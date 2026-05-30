@@ -5,11 +5,13 @@ import { CloseIcon, FlipCameraIcon } from './Icons';
 interface DetectedWord {
   text: string;
   x0: number; y0: number; x1: number; y1: number;
+  meaning: string | null;
 }
 
 interface Props {
   onTextDetected: (text: string) => void;
   onClose: () => void;
+  lookupWord: (word: string) => string | null;
   accentColor: string;
   bgColor: string;
   cardColor: string;
@@ -20,6 +22,7 @@ interface Props {
 export default function CameraScanner({
   onTextDetected,
   onClose,
+  lookupWord,
   accentColor,
   bgColor,
   cardColor,
@@ -34,12 +37,31 @@ export default function CameraScanner({
   const loopRef     = useRef<boolean>(false);
   const wordsRef    = useRef<DetectedWord[]>([]);
 
-  const [cameraError, setCameraError] = useState<string | null>(null);
-  const [scanning,    setScanning]    = useState(false);
-  const [facingMode,  setFacingMode]  = useState<'environment' | 'user'>('environment');
-  const [words,       setWords]       = useState<DetectedWord[]>([]);
-  const [selectedWord, setSelectedWord] = useState<string | null>(null);
-  const [statusMsg,   setStatusMsg]   = useState('Starting…');
+  const [cameraError,   setCameraError]   = useState<string | null>(null);
+  const [scanning,      setScanning]      = useState(false);
+  const [words,         setWords]         = useState<DetectedWord[]>([]);
+  const [selectedWord,  setSelectedWord]  = useState<DetectedWord | null>(null);
+  const [statusMsg,     setStatusMsg]     = useState('Starting…');
+
+  // ── Preprocess video frame for better OCR ────────────────────────────────
+  const preprocessFrame = useCallback((dst: HTMLCanvasElement): { vw: number; vh: number } | null => {
+    const video = videoRef.current;
+    if (!video || video.readyState < 2) return null;
+    const vw = video.videoWidth;
+    const vh = video.videoHeight;
+    if (!vw || !vh) return null;
+
+    dst.width  = vw;
+    dst.height = vh;
+    const ctx = dst.getContext('2d');
+    if (!ctx) return null;
+
+    // Grayscale + higher contrast → dramatically helps Tesseract
+    ctx.filter = 'grayscale(1) contrast(1.8) brightness(1.05)';
+    ctx.drawImage(video, 0, 0, vw, vh);
+    ctx.filter = 'none';
+    return { vw, vh };
+  }, []);
 
   // ── Draw word overlay on canvas ──────────────────────────────────────────
   const drawOverlay = useCallback((detected: DetectedWord[], vw: number, vh: number) => {
@@ -50,9 +72,7 @@ export default function CameraScanner({
 
     canvas.width  = canvas.offsetWidth;
     canvas.height = canvas.offsetHeight;
-
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-
     if (!detected.length || !vw || !vh) return;
 
     const scaleX = canvas.width  / vw;
@@ -64,124 +84,147 @@ export default function CameraScanner({
       const bw = (w.x1 - w.x0) * scaleX;
       const bh = (w.y1 - w.y0) * scaleY;
 
+      const inDict  = w.meaning !== null;
+      const boxColor = inDict ? accentColor : 'rgba(255,255,255,0.4)';
+      const fillAlpha = inDict ? 0.22 : 0.08;
+
       // Box fill
-      ctx.fillStyle = 'rgba(91,132,196,0.18)';
+      ctx.fillStyle = inDict
+        ? `rgba(91,132,196,${fillAlpha})`
+        : `rgba(255,255,255,${fillAlpha})`;
       ctx.beginPath();
       ctx.roundRect(x - 2, y - 2, bw + 4, bh + 4, 4);
       ctx.fill();
 
       // Box stroke
-      ctx.strokeStyle = accentColor;
-      ctx.lineWidth = 1.5;
+      ctx.strokeStyle = boxColor;
+      ctx.lineWidth = inDict ? 2 : 1;
       ctx.beginPath();
       ctx.roundRect(x - 2, y - 2, bw + 4, bh + 4, 4);
       ctx.stroke();
 
-      // Underline
-      ctx.strokeStyle = accentColor;
-      ctx.lineWidth = 2;
-      ctx.beginPath();
-      ctx.moveTo(x, y + bh + 3);
-      ctx.lineTo(x + bw, y + bh + 3);
-      ctx.stroke();
+      // Underline (only for dictionary words)
+      if (inDict) {
+        ctx.strokeStyle = accentColor;
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(x, y + bh + 4);
+        ctx.lineTo(x + bw, y + bh + 4);
+        ctx.stroke();
+      }
 
-      // Text label
-      const fontSize = Math.max(10, Math.min(bh * 0.55, 16));
-      ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
-      ctx.fillStyle = '#ffffff';
-      ctx.shadowColor = 'rgba(0,0,0,0.8)';
-      ctx.shadowBlur  = 4;
-      ctx.fillText(w.text, x + 2, y + bh - 2);
-      ctx.shadowBlur = 0;
+      // Show meaning label above the box for dictionary words
+      if (inDict && w.meaning) {
+        const labelText = w.meaning.length > 30 ? w.meaning.slice(0, 28) + '…' : w.meaning;
+        const fontSize  = Math.max(9, Math.min(13, bh * 0.5));
+        ctx.font = `bold ${fontSize}px system-ui, sans-serif`;
+
+        const labelW = ctx.measureText(labelText).width + 10;
+        const labelH = fontSize + 8;
+        const lx = Math.max(2, x);
+        const ly = Math.max(labelH + 2, y - labelH - 4);
+
+        // Label background
+        ctx.fillStyle = accentColor;
+        ctx.beginPath();
+        ctx.roundRect(lx, ly, labelW, labelH, 4);
+        ctx.fill();
+
+        // Label text
+        ctx.fillStyle = '#fff';
+        ctx.shadowColor = 'rgba(0,0,0,0.6)';
+        ctx.shadowBlur  = 3;
+        ctx.fillText(labelText, lx + 5, ly + labelH - 4);
+        ctx.shadowBlur  = 0;
+      }
     });
   }, [accentColor]);
 
   // ── OCR loop ─────────────────────────────────────────────────────────────
   const runOCRLoop = useCallback(async () => {
-    const video   = videoRef.current;
     const capture = captureRef.current;
-    if (!video || !capture || !workerRef.current) return;
+    if (!capture || !workerRef.current) return;
 
     while (loopRef.current) {
-      if (video.readyState < 2 || video.videoWidth === 0) {
+      const frame = preprocessFrame(capture);
+      if (!frame) {
         await sleep(200);
         continue;
       }
+      const { vw, vh } = frame;
 
       setScanning(true);
       setStatusMsg('Scanning…');
 
-      const vw = video.videoWidth;
-      const vh = video.videoHeight;
-      capture.width  = vw;
-      capture.height = vh;
-      const ctx = capture.getContext('2d');
-      if (!ctx) break;
-      ctx.drawImage(video, 0, 0, vw, vh);
-
       try {
         const { data } = await workerRef.current.recognize(capture);
         const detected: DetectedWord[] = (data.words || [])
-          .filter((w: any) => w.confidence > 40 && w.text.trim().length > 1)
-          .map((w: any) => ({
-            text: w.text.trim(),
-            x0: w.bbox.x0, y0: w.bbox.y0,
-            x1: w.bbox.x1, y1: w.bbox.y1,
-          }));
+          .filter((w: any) => w.confidence > 15 && w.text.trim().length > 1)
+          .map((w: any) => {
+            const text = w.text.trim().replace(/[^a-zA-Z'-]/g, '');
+            const meaning = text.length > 1 ? lookupWord(text) : null;
+            return {
+              text,
+              x0: w.bbox.x0, y0: w.bbox.y0,
+              x1: w.bbox.x1, y1: w.bbox.y1,
+              meaning,
+            };
+          })
+          .filter((w: DetectedWord) => w.text.length > 1);
 
         wordsRef.current = detected;
         setWords(detected);
-        setStatusMsg(detected.length > 0
-          ? `${detected.length} word${detected.length !== 1 ? 's' : ''} detected — tap to search`
-          : 'No text found — point at printed text');
+
+        const dictHits = detected.filter(w => w.meaning !== null).length;
+        if (detected.length > 0) {
+          setStatusMsg(dictHits > 0
+            ? `${dictHits} word${dictHits !== 1 ? 's' : ''} found in dictionary — tap to see meaning`
+            : `${detected.length} word${detected.length !== 1 ? 's' : ''} detected — not in dictionary`);
+        } else {
+          setStatusMsg('No text found — hold steady, point at printed text');
+        }
         drawOverlay(detected, vw, vh);
       } catch {
-        // ignore transient errors, keep looping
+        // ignore transient errors
       }
 
       setScanning(false);
-      await sleep(800); // pause between scans
+      await sleep(1000);
     }
-  }, [drawOverlay]);
+  }, [drawOverlay, lookupWord, preprocessFrame]);
 
   // ── Start/stop camera ────────────────────────────────────────────────────
   const startCamera = useCallback(async (facing: 'environment' | 'user') => {
-    // Stop any existing stream first
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
     }
-    // Reset the video element to avoid AbortError from interrupted play()
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
+        video: { facingMode: facing, width: { ideal: 1920 }, height: { ideal: 1080 } },
         audio: false,
       });
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        try {
-          await videoRef.current.play();
-        } catch (playErr: any) {
-          // AbortError is expected if component unmounts mid-play; ignore it
-          if (playErr.name !== 'AbortError') throw playErr;
-        }
+        try { await videoRef.current.play(); }
+        catch (e: any) { if (e.name !== 'AbortError') throw e; }
       }
       setCameraError(null);
     } catch (err: any) {
-      if (err.name === 'AbortError') return; // ignore — component unmounted
-      const msg =
-        err.name === 'NotAllowedError' ? 'Camera access denied. Please allow camera permission and try again.' :
+      if (err.name === 'AbortError') return;
+      setCameraError(
+        err.name === 'NotAllowedError' ? 'Camera access denied. Please allow camera permission.' :
         err.name === 'NotFoundError'   ? 'No camera found on this device.' :
-        'Could not open camera: ' + (err.message || err.name);
-      setCameraError(msg);
+        'Could not open camera: ' + (err.message || err.name)
+      );
     }
   }, []);
 
-  // ── Init worker + camera — runs once on mount ─────────────────────────────
+  // ── Init worker + camera ─────────────────────────────────────────────────
   useEffect(() => {
     let mounted = true;
 
@@ -190,6 +233,13 @@ export default function CameraScanner({
       try {
         const worker = await createWorker('eng', 1, { logger: () => {} });
         if (!mounted) { await worker.terminate(); return; }
+
+        // PSM 6 = assume a uniform block of text — better for documents
+        await worker.setParameters({
+          tessedit_pageseg_mode: '6' as any,
+          preserve_interword_spaces: '1' as any,
+        });
+
         workerRef.current = worker;
         await startCamera('environment');
         if (!mounted) return;
@@ -208,44 +258,36 @@ export default function CameraScanner({
       workerRef.current?.terminate();
       workerRef.current = null;
     };
-  }, []);  // only on mount — no dependency on facingMode
+  }, []);
 
-  // ── Handle click on overlay canvas → find word under pointer ─────────────
+  // ── Handle click on overlay canvas ────────────────────────────────────────
   const handleOverlayClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     const canvas = overlayRef.current;
     const video  = videoRef.current;
     if (!canvas || !video) return;
 
-    const rect = canvas.getBoundingClientRect();
+    const rect   = canvas.getBoundingClientRect();
     const clickX = e.clientX - rect.left;
     const clickY = e.clientY - rect.top;
-
-    const scaleX = canvas.width / video.videoWidth;
-    const scaleY = canvas.height / video.videoHeight;
+    const scaleX = canvas.width / (video.videoWidth || 1);
+    const scaleY = canvas.height / (video.videoHeight || 1);
 
     const hit = wordsRef.current.find(w => {
-      const x  = w.x0 * scaleX - 4;
-      const y  = w.y0 * scaleY - 4;
-      const bw = (w.x1 - w.x0) * scaleX + 8;
-      const bh = (w.y1 - w.y0) * scaleY + 8;
+      const x  = w.x0 * scaleX - 6;
+      const y  = w.y0 * scaleY - 6;
+      const bw = (w.x1 - w.x0) * scaleX + 12;
+      const bh = (w.y1 - w.y0) * scaleY + 12;
       return clickX >= x && clickX <= x + bw && clickY >= y && clickY <= y + bh;
     });
 
-    if (hit) {
-      setSelectedWord(hit.text);
-    }
+    if (hit) setSelectedWord(hit);
   }, []);
-
-  const confirmWord = useCallback(() => {
-    if (selectedWord) {
-      onTextDetected(selectedWord);
-      onClose();
-    }
-  }, [selectedWord, onTextDetected, onClose]);
 
   const flipCamera = useCallback(() => {
-    setFacingMode(f => f === 'environment' ? 'user' : 'environment');
-  }, []);
+    const next = streamRef.current?.getVideoTracks()[0]?.getSettings().facingMode === 'user'
+      ? 'environment' : 'user';
+    startCamera(next);
+  }, [startCamera]);
 
   return (
     <div style={{
@@ -272,7 +314,9 @@ export default function CameraScanner({
             {statusMsg}
           </div>
         </div>
-        <button onClick={flipCamera} style={btnStyle} title="Flip camera"><FlipCameraIcon size={20} color="#fff" /></button>
+        <button onClick={flipCamera} style={btnStyle} title="Flip camera">
+          <FlipCameraIcon size={20} color="#fff" />
+        </button>
       </div>
 
       {/* Camera + overlay */}
@@ -292,7 +336,6 @@ export default function CameraScanner({
               playsInline
               muted
             />
-            {/* Transparent overlay canvas for bounding boxes */}
             <canvas
               ref={overlayRef}
               onClick={handleOverlayClick}
@@ -302,7 +345,6 @@ export default function CameraScanner({
                 cursor: 'crosshair',
               }}
             />
-            {/* Scanning pulse indicator */}
             {scanning && (
               <div style={{
                 position: 'absolute', top: 12, right: 12,
@@ -319,42 +361,58 @@ export default function CameraScanner({
       {/* Hidden capture canvas */}
       <canvas ref={captureRef} style={{ display: 'none' }} />
 
-      {/* Bottom bar */}
+      {/* Bottom panel */}
       <div style={{
         padding: '14px 20px 28px',
-        backgroundColor: 'rgba(0,0,0,0.85)',
-        backdropFilter: 'blur(8px)',
-        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12,
+        backgroundColor: 'rgba(0,0,0,0.88)',
+        backdropFilter: 'blur(10px)',
+        display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 10,
         zIndex: 2,
+        minHeight: 80,
       }}>
         {selectedWord ? (
-          <>
+          <div style={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {/* Word + meaning card */}
             <div style={{
-              backgroundColor: 'rgba(91,132,196,0.2)',
+              backgroundColor: 'rgba(91,132,196,0.18)',
               border: `1.5px solid ${accentColor}`,
-              borderRadius: 10, padding: '8px 18px',
-              color: '#fff', fontSize: 16, fontWeight: 700,
+              borderRadius: 12, padding: '10px 16px',
+              display: 'flex', flexDirection: 'column', gap: 4,
             }}>
-              "{selectedWord}"
+              <div style={{ color: '#fff', fontSize: 17, fontWeight: 700 }}>
+                {selectedWord.text}
+              </div>
+              {selectedWord.meaning ? (
+                <div style={{ color: accentColor, fontSize: 14, direction: 'rtl', textAlign: 'right' }}>
+                  {selectedWord.meaning}
+                </div>
+              ) : (
+                <div style={{ color: '#888', fontSize: 13 }}>
+                  Not in dictionary
+                </div>
+              )}
             </div>
-            <div style={{ display: 'flex', gap: 10 }}>
+            {/* Action buttons */}
+            <div style={{ display: 'flex', gap: 8, width: '100%' }}>
               <button
                 onClick={() => setSelectedWord(null)}
-                style={{ ...actionBtn, backgroundColor: 'rgba(255,255,255,0.1)', color: '#ccc' }}
+                style={{ ...actionBtn, flex: 1, backgroundColor: 'rgba(255,255,255,0.1)', color: '#ccc' }}
               >
                 Cancel
               </button>
               <button
-                onClick={confirmWord}
-                style={{ ...actionBtn, backgroundColor: accentColor, color: '#fff' }}
+                onClick={() => { onTextDetected(selectedWord.text); onClose(); }}
+                style={{ ...actionBtn, flex: 2, backgroundColor: accentColor, color: '#fff' }}
               >
-                Search this word →
+                Open in Dictionary →
               </button>
             </div>
-          </>
+          </div>
         ) : (
-          <p style={{ margin: 0, fontSize: 12, color: '#888', textAlign: 'center' }}>
-            Tap a highlighted word to search it in the dictionary
+          <p style={{ margin: 0, fontSize: 12, color: '#777', textAlign: 'center' }}>
+            {words.length > 0
+              ? 'Tap a highlighted word to see its Kurdish meaning'
+              : 'Hold camera steady over printed text'}
           </p>
         )}
       </div>
@@ -387,6 +445,6 @@ const errorContainer: React.CSSProperties = {
 };
 
 const actionBtn: React.CSSProperties = {
-  border: 'none', borderRadius: 10, padding: '10px 20px',
+  border: 'none', borderRadius: 10, padding: '10px 16px',
   fontSize: 14, fontWeight: 700, cursor: 'pointer',
 };

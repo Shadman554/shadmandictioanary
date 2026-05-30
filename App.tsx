@@ -546,6 +546,19 @@ const doSearch = (entries: Entry[], query: string, cat: string | null, limit: nu
   return result;
 };
 
+// ─── Camera word lookup (exact match in English dictionary) ──────────────────
+
+const lookupWordInDict = (word: string): string | null => {
+  const entries = buildIndex('entoku');
+  const q = word.toLowerCase().trim();
+  if (!q) return null;
+  const idx = lowerBound(entries, q);
+  if (idx < entries.length && entries[idx].wordLow === q) {
+    return entries[idx].meaning;
+  }
+  return null;
+};
+
 // ─── Dynamic Colors ───────────────────────────────────────────────────────────
 
 const getCategoryColors = (cat: string, isLight: boolean) => {
@@ -1339,6 +1352,7 @@ export default function App() {
             if (tab !== 'search') switchTab('search');
           }}
           onClose={() => setShowCamera(false)}
+          lookupWord={lookupWordInDict}
           accentColor={C.accent}
           bgColor={C.bg}
           cardColor={C.card}
