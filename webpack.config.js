@@ -3,6 +3,14 @@ const HtmlWebpackPlugin = require('html-webpack-plugin');
 
 const appDirectory = path.resolve(__dirname);
 
+const babelConfig = {
+  loader: 'babel-loader',
+  options: {
+    configFile: path.resolve(appDirectory, 'babel.web.config.js'),
+    cacheDirectory: true,
+  },
+};
+
 module.exports = {
   mode: 'development',
   entry: './index.web.js',
@@ -28,13 +36,17 @@ module.exports = {
   },
   module: {
     rules: [
+      // ── Source files (project root, never node_modules) ──────────────────
+      {
+        test: /\.(js|mjs|jsx|ts|tsx)$/,
+        exclude: /node_modules/,
+        use: babelConfig,
+        resolve: { fullySpecified: false },
+      },
+      // ── node_modules that need transpilation ─────────────────────────────
       {
         test: /\.(js|mjs|jsx|ts|tsx)$/,
         include: [
-          path.resolve(appDirectory, 'App.tsx'),
-          path.resolve(appDirectory, 'CameraScanner.tsx'),
-          path.resolve(appDirectory, 'Icons.tsx'),
-          path.resolve(appDirectory, 'index.web.js'),
           path.resolve(appDirectory, 'node_modules/react-native-web'),
           path.resolve(appDirectory, 'node_modules/@react-native-async-storage'),
           path.resolve(appDirectory, 'node_modules/@react-native'),
@@ -43,16 +55,8 @@ module.exports = {
           path.resolve(appDirectory, 'node_modules/react-native-haptic-feedback'),
           path.resolve(appDirectory, 'node_modules/@react-native-community'),
         ],
-        use: {
-          loader: 'babel-loader',
-          options: {
-            configFile: path.resolve(appDirectory, 'babel.web.config.js'),
-            cacheDirectory: true,
-          },
-        },
-        resolve: {
-          fullySpecified: false,
-        },
+        use: babelConfig,
+        resolve: { fullySpecified: false },
       },
       {
         test: /\.css$/,

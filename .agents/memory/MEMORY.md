@@ -1,0 +1,1 @@
+- [webpack tsx include pattern](webpack-tsx-include.md) — use exclude:/node_modules/ not per-file include; split node_modules into a separate rule
