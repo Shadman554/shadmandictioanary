@@ -42,7 +42,7 @@ type SearchMode =
   'frtoku'|'kutofr'|'grtoku'|'kutogr'|'rutoku'|'kutoru'|
   'svtoku'|'kutosv'|'trtoku'|'kutotr';
 
-type Tab = 'search'|'saved'|'settings';
+type Tab = 'search'|'saved'|'translate'|'settings';
 
 // ─── Kurdish Fonts ────────────────────────────────────────────────────────────
 
@@ -85,6 +85,319 @@ const MODES: { key: SearchMode; label: string; from: string; to: string }[] = [
 ];
 
 const ALL_KEYS = MODES.map(m => m.key) as SearchMode[];
+
+// ─── Online Translator Languages ─────────────────────────────────────────────
+
+const TRANSLATE_LANGS: { name: string; code: string }[] = [
+  { name: 'Auto Detect',           code: 'auto'  },
+  { name: 'Arabic',                code: 'ar'    },
+  { name: 'Armenian',              code: 'hy'    },
+  { name: 'Azerbaijani',           code: 'az'    },
+  { name: 'Bulgarian',             code: 'bg'    },
+  { name: 'Chinese (Simplified)',  code: 'zh-CN' },
+  { name: 'Chinese (Traditional)', code: 'zh-TW' },
+  { name: 'Croatian',              code: 'hr'    },
+  { name: 'Czech',                 code: 'cs'    },
+  { name: 'Danish',                code: 'da'    },
+  { name: 'Dutch',                 code: 'nl'    },
+  { name: 'English',               code: 'en'    },
+  { name: 'Estonian',              code: 'et'    },
+  { name: 'Filipino',              code: 'tl'    },
+  { name: 'Finnish',               code: 'fi'    },
+  { name: 'French',                code: 'fr'    },
+  { name: 'German',                code: 'de'    },
+  { name: 'Greek',                 code: 'el'    },
+  { name: 'Hebrew',                code: 'iw'    },
+  { name: 'Hindi',                 code: 'hi'    },
+  { name: 'Hungarian',             code: 'hu'    },
+  { name: 'Indonesian',            code: 'id'    },
+  { name: 'Irish',                 code: 'ga'    },
+  { name: 'Italian',               code: 'it'    },
+  { name: 'Japanese',              code: 'ja'    },
+  { name: 'Korean',                code: 'ko'    },
+  { name: 'Kurdish (Sorani)',       code: 'ckb'   },
+  { name: 'Latvian',               code: 'lv'    },
+  { name: 'Lithuanian',            code: 'lt'    },
+  { name: 'Malay',                 code: 'ms'    },
+  { name: 'Norwegian',             code: 'no'    },
+  { name: 'Persian',               code: 'fa'    },
+  { name: 'Polish',                code: 'pl'    },
+  { name: 'Portuguese',            code: 'pt'    },
+  { name: 'Romanian',              code: 'ro'    },
+  { name: 'Russian',               code: 'ru'    },
+  { name: 'Serbian',               code: 'sr'    },
+  { name: 'Slovak',                code: 'sk'    },
+  { name: 'Slovenian',             code: 'sl'    },
+  { name: 'Spanish',               code: 'es'    },
+  { name: 'Swahili',               code: 'sw'    },
+  { name: 'Swedish',               code: 'sv'    },
+  { name: 'Thai',                  code: 'th'    },
+  { name: 'Turkish',               code: 'tr'    },
+  { name: 'Ukrainian',             code: 'uk'    },
+  { name: 'Urdu',                  code: 'ur'    },
+  { name: 'Vietnamese',            code: 'vi'    },
+  { name: 'Welsh',                 code: 'cy'    },
+  { name: 'Yiddish',               code: 'yi'    },
+];
+
+// ─── Translate Tab Component ──────────────────────────────────────────────────
+
+interface LangOption { name: string; code: string; }
+
+const TranslateTab: React.FC<{ C: any; fontFamily: string; textScale: number }> = ({
+  C, fontFamily, textScale: sc,
+}) => {
+  const [fromLang, setFromLang]       = useState<LangOption>({ name: 'English',          code: 'en'  });
+  const [toLang,   setToLang]         = useState<LangOption>({ name: 'Kurdish (Sorani)', code: 'ckb' });
+  const [inputText,  setInputText]    = useState('');
+  const [outputText, setOutputText]   = useState('');
+  const [translating, setTranslating] = useState(false);
+  const [fromPicker, setFromPicker]   = useState(false);
+  const [toPicker,   setToPicker]     = useState(false);
+  const [error,      setError]        = useState('');
+
+  const doTranslate = useCallback(async (text: string, from: string, to: string) => {
+    if (!text.trim()) { setOutputText(''); return; }
+    setTranslating(true);
+    setError('');
+    try {
+      const url =
+        `https://translate.googleapis.com/translate_a/single?client=gtx` +
+        `&sl=${from}&tl=${to}&dt=t&q=${encodeURIComponent(text)}`;
+      const res  = await fetch(url);
+      const json = await res.json();
+      setOutputText(json[0].map((item: any) => item[0]).join(''));
+    } catch {
+      setError('Translation failed. Please check your connection.');
+    } finally {
+      setTranslating(false);
+    }
+  }, []);
+
+  const handleSwap = () => {
+    if (fromLang.code === 'auto') return;
+    const tmp = fromLang;
+    setFromLang(toLang);
+    setToLang(tmp);
+    setInputText(outputText);
+    setOutputText(inputText);
+  };
+
+  const handleInputChange = (t: string) => {
+    const limited = t.slice(0, 5000);
+    setInputText(limited);
+    if (limited.length > 2) doTranslate(limited, fromLang.code, toLang.code);
+    else setOutputText('');
+  };
+
+  const card    = { backgroundColor: C.card,    borderRadius: 16, borderWidth: 1 as any, borderColor: C.border    };
+  const surface = { backgroundColor: C.surface, borderRadius: 12, borderWidth: 1 as any, borderColor: C.borderMid };
+
+  const LangPicker = ({
+    visible, onClose, title, selected, onSelect, allowAuto,
+  }: {
+    visible: boolean; onClose: () => void; title: string;
+    selected: LangOption; onSelect: (l: LangOption) => void; allowAuto?: boolean;
+  }) => (
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+      <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.65)' }}>
+        <Pressable style={StyleSheet.absoluteFillObject} onPress={onClose} />
+        <View style={{ backgroundColor: C.card, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingTop: 12, maxHeight: '75%' }}>
+          <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.15)', alignSelf: 'center', marginBottom: 16 }} />
+          <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 12, gap: 10 }}>
+            <Text style={{ fontSize: 16, color: C.accent }}>🌐</Text>
+            <Text style={{ fontSize: 16, fontWeight: '900', color: C.text1, fontFamily }}>{title}</Text>
+          </View>
+          <ScrollView showsVerticalScrollIndicator={false}>
+            {TRANSLATE_LANGS.filter(l => allowAuto || l.code !== 'auto').map(l => {
+              const active = selected.code === l.code;
+              return (
+                <TouchableOpacity
+                  key={l.code}
+                  style={[{
+                    flexDirection: 'row', alignItems: 'center',
+                    paddingHorizontal: 16, paddingVertical: 14,
+                    borderRadius: 12, marginBottom: 5, marginHorizontal: 10,
+                    borderWidth: 1,
+                  }, active
+                    ? { backgroundColor: C.accentDim,  borderColor: C.accentBorder }
+                    : { backgroundColor: C.surface,    borderColor: 'transparent'  }
+                  ]}
+                  onPress={() => { onSelect(l); onClose(); }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={{ flex: 1, fontSize: 15, fontWeight: '700', color: active ? C.accent : C.text1, fontFamily }}>
+                    {l.name}
+                  </Text>
+                  {active && <Text style={{ fontSize: 16, color: C.accent, fontWeight: '900' }}>✓</Text>}
+                </TouchableOpacity>
+              );
+            })}
+            <View style={{ height: 32 }} />
+          </ScrollView>
+        </View>
+      </View>
+    </Modal>
+  );
+
+  return (
+    <>
+      <ScrollView
+        style={{ flex: 1, backgroundColor: C.bg }}
+        contentContainerStyle={{ padding: 16, paddingBottom: 40 }}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {/* Language selector row */}
+        <View style={[card, { flexDirection: 'row', alignItems: 'center', padding: 8, gap: 8, marginBottom: 12 }]}>
+          <TouchableOpacity
+            style={[surface, { flex: 1, paddingVertical: 14, paddingHorizontal: 12, alignItems: 'center' }]}
+            onPress={() => setFromPicker(true)}
+            activeOpacity={0.7}
+          >
+            <Text style={{ fontSize: 10, fontWeight: '700', color: C.text3, fontFamily, letterSpacing: 1.5, marginBottom: 3 }}>FROM</Text>
+            <Text style={{ fontSize: 13, fontWeight: '800', color: C.text1, fontFamily }} numberOfLines={1}>{fromLang.name}</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            onPress={handleSwap}
+            style={{
+              width: 40, height: 40, borderRadius: 20,
+              backgroundColor: fromLang.code === 'auto' ? C.surface : C.accent,
+              alignItems: 'center', justifyContent: 'center',
+            }}
+            activeOpacity={0.75}
+          >
+            <Text style={{ fontSize: 18, color: fromLang.code === 'auto' ? C.text3 : '#fff' }}>⇄</Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[surface, { flex: 1, paddingVertical: 14, paddingHorizontal: 12, alignItems: 'center' }]}
+            onPress={() => setToPicker(true)}
+            activeOpacity={0.7}
+          >
+            <Text style={{ fontSize: 10, fontWeight: '700', color: C.text3, fontFamily, letterSpacing: 1.5, marginBottom: 3 }}>TO</Text>
+            <Text style={{ fontSize: 13, fontWeight: '800', color: C.text1, fontFamily }} numberOfLines={1}>{toLang.name}</Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Input area */}
+        <View style={[card, { marginBottom: 12 }]}>
+          <TextInput
+            style={{
+              minHeight: 130, padding: 16, fontSize: 16,
+              textAlignVertical: 'top', color: C.text1, fontFamily,
+            }}
+            placeholder="Enter text to translate…"
+            placeholderTextColor={C.text3}
+            value={inputText}
+            onChangeText={handleInputChange}
+            multiline
+            maxLength={5000}
+          />
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 12 }}>
+            {inputText ? (
+              <TouchableOpacity onPress={() => { setInputText(''); setOutputText(''); setError(''); }}>
+                <Text style={{ fontSize: 12, fontWeight: '700', color: C.text2, fontFamily }}>✕ Clear</Text>
+              </TouchableOpacity>
+            ) : <View />}
+            <Text style={{ fontSize: 11, color: C.text3, fontFamily }}>{inputText.length} / 5000</Text>
+          </View>
+        </View>
+
+        {/* Translate button */}
+        <TouchableOpacity
+          style={{
+            backgroundColor: C.accent, borderRadius: 14, padding: 16,
+            alignItems: 'center', flexDirection: 'row', justifyContent: 'center', gap: 10,
+            marginBottom: 12,
+            opacity: (!inputText.trim() || translating) ? 0.5 : 1,
+          }}
+          onPress={() => doTranslate(inputText, fromLang.code, toLang.code)}
+          disabled={!inputText.trim() || translating}
+          activeOpacity={0.75}
+        >
+          <Text style={{ fontSize: 20 }}>🌐</Text>
+          <Text style={{ color: '#fff', fontFamily, fontSize: 15, fontWeight: '800' }}>
+            {translating ? 'Translating…' : 'Translate'}
+          </Text>
+        </TouchableOpacity>
+
+        {/* Error */}
+        {error ? (
+          <View style={{ backgroundColor: 'rgba(239,83,80,0.12)', borderRadius: 12, padding: 14, marginBottom: 12 }}>
+            <Text style={{ color: '#EF5350', fontFamily, fontSize: 13, textAlign: 'center' }}>{error}</Text>
+          </View>
+        ) : null}
+
+        {/* Output area */}
+        <View style={[card, { minHeight: 130 }]}>
+          {translating ? (
+            <View style={{ padding: 32, alignItems: 'center', gap: 12 }}>
+              <ActivityIndicator color={C.accent} size="large" />
+              <Text style={{ fontSize: 13, color: C.text2, fontFamily }}>Translating…</Text>
+            </View>
+          ) : outputText ? (
+            <>
+              <View style={{ padding: 16 }}>
+                <Text selectable style={{ fontSize: 16, lineHeight: 26, color: C.text1, fontFamily }}>{outputText}</Text>
+              </View>
+              <View style={{ height: 1, backgroundColor: C.border, marginHorizontal: 16 }} />
+              <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingVertical: 10 }}>
+                <Text style={{ fontSize: 11, color: C.text3, fontFamily }}>{toLang.name}</Text>
+                <TouchableOpacity
+                  style={{ flexDirection: 'row', alignItems: 'center', gap: 6, backgroundColor: C.surface, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20 }}
+                  onPress={() => {
+                    if (typeof navigator !== 'undefined' && (navigator as any).clipboard) {
+                      (navigator as any).clipboard.writeText(outputText);
+                    }
+                  }}
+                >
+                  <Text style={{ fontSize: 14 }}>📋</Text>
+                  <Text style={{ fontSize: 12, fontWeight: '700', color: C.text2, fontFamily }}>Copy</Text>
+                </TouchableOpacity>
+              </View>
+            </>
+          ) : (
+            <View style={{ padding: 32, alignItems: 'center', gap: 8 }}>
+              <Text style={{ fontSize: 36 }}>🌍</Text>
+              <Text style={{ fontSize: 14, fontWeight: '700', color: C.text2, fontFamily }}>Translation appears here</Text>
+              <Text style={{ fontSize: 12, color: C.text3, fontFamily, textAlign: 'center' }}>
+                Type text above and tap Translate
+              </Text>
+            </View>
+          )}
+        </View>
+
+        <Text style={{ fontSize: 10, color: C.text3, fontFamily, textAlign: 'center', marginTop: 16 }}>
+          Powered by Google Translate · 50 languages supported
+        </Text>
+      </ScrollView>
+
+      <LangPicker
+        visible={fromPicker}
+        onClose={() => setFromPicker(false)}
+        title="Translate From"
+        selected={fromLang}
+        allowAuto
+        onSelect={l => {
+          setFromLang(l);
+          doTranslate(inputText, l.code, toLang.code);
+        }}
+      />
+      <LangPicker
+        visible={toPicker}
+        onClose={() => setToPicker(false)}
+        title="Translate To"
+        selected={toLang}
+        onSelect={l => {
+          setToLang(l);
+          doTranslate(inputText, fromLang.code, l.code);
+        }}
+      />
+    </>
+  );
+};
 
 // ─── Raw JSON loaders ─────────────────────────────────────────────────────────
 
@@ -286,7 +599,7 @@ export default function App() {
   const listRef   = useRef<FlatList>(null);
   const focusAnim = useRef(new Animated.Value(0)).current;
 
-  const TAB_LIST: Tab[] = ['search', 'saved', 'settings'];
+  const TAB_LIST: Tab[] = ['search', 'saved', 'translate', 'settings'];
   const tabAnim  = useRef(new Animated.Value(0)).current;
 
   const switchTab = useCallback((t: Tab) => {
@@ -491,51 +804,64 @@ export default function App() {
             <Image source={LOGO} style={S.logoImg} resizeMode="cover" />
           </View>
 
-          <Animated.View style={[
-            S.searchWrap,
-            {
-              borderColor: focusAnim.interpolate({
-                inputRange: [0, 1],
-                outputRange: [C.border, C.accent],
-              }),
-              shadowColor: C.accent,
-              shadowOpacity: focusAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 0.2] }),
-              shadowRadius: 8,
-              shadowOffset: { width: 0, height: 0 },
-              elevation: focused ? 6 : 0,
-            },
-          ]}>
-            {/* FIX: fontFamily on all header Text nodes */}
-            <Text style={[S.searchIcon, { fontFamily }]}>⌕</Text>
-            <TextInput
-              style={[S.input, { fontFamily }]}
-              value={query}
-              onChangeText={setQuery}
-              placeholder={`${activeMode.from} or Kurdish…`}
-              placeholderTextColor={C.text3}
-              returnKeyType="search"
-              onSubmitEditing={() => addRecent(query)}
-              onFocus={() => setFocused(true)}
-              onBlur={() => setFocused(false)}
-              autoCorrect={false}
-              autoCapitalize="none"
-            />
-            {query.length > 0 && (
-              <TouchableOpacity
-                onPress={() => setQuery('')}
-                hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-              >
-                <View style={S.clearX}>
-                  <Text style={[S.clearXText, { fontFamily }]}>✕</Text>
-                </View>
-              </TouchableOpacity>
-            )}
-          </Animated.View>
+          {tab === 'translate' ? (
+            <View style={{ flex: 1, justifyContent: 'center' }}>
+              <Text style={{ fontSize: 17, fontWeight: '900', color: C.text1, fontFamily, letterSpacing: -0.3 }}>
+                Online Translator
+              </Text>
+              <Text style={{ fontSize: 11, color: C.text3, fontFamily, marginTop: 1 }}>
+                50 languages · Powered by Google
+              </Text>
+            </View>
+          ) : (
+            <>
+              <Animated.View style={[
+                S.searchWrap,
+                {
+                  borderColor: focusAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [C.border, C.accent],
+                  }),
+                  shadowColor: C.accent,
+                  shadowOpacity: focusAnim.interpolate({ inputRange: [0, 1], outputRange: [0, 0.2] }),
+                  shadowRadius: 8,
+                  shadowOffset: { width: 0, height: 0 },
+                  elevation: focused ? 6 : 0,
+                },
+              ]}>
+                {/* FIX: fontFamily on all header Text nodes */}
+                <Text style={[S.searchIcon, { fontFamily }]}>⌕</Text>
+                <TextInput
+                  style={[S.input, { fontFamily }]}
+                  value={query}
+                  onChangeText={setQuery}
+                  placeholder={`${activeMode.from} or Kurdish…`}
+                  placeholderTextColor={C.text3}
+                  returnKeyType="search"
+                  onSubmitEditing={() => addRecent(query)}
+                  onFocus={() => setFocused(true)}
+                  onBlur={() => setFocused(false)}
+                  autoCorrect={false}
+                  autoCapitalize="none"
+                />
+                {query.length > 0 && (
+                  <TouchableOpacity
+                    onPress={() => setQuery('')}
+                    hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  >
+                    <View style={S.clearX}>
+                      <Text style={[S.clearXText, { fontFamily }]}>✕</Text>
+                    </View>
+                  </TouchableOpacity>
+                )}
+              </Animated.View>
 
-          <TouchableOpacity style={S.modePill} onPress={() => setModePicker(true)} activeOpacity={0.75}>
-            <Text style={[S.modePillText, { fontFamily }]}>{activeMode.label}</Text>
-            <Text style={[S.modePillArrow, { fontFamily }]}>▼</Text>
-          </TouchableOpacity>
+              <TouchableOpacity style={S.modePill} onPress={() => setModePicker(true)} activeOpacity={0.75}>
+                <Text style={[S.modePillText, { fontFamily }]}>{activeMode.label}</Text>
+                <Text style={[S.modePillArrow, { fontFamily }]}>▼</Text>
+              </TouchableOpacity>
+            </>
+          )}
         </View>
 
         {tab === 'search' && availableCats.length > 0 && (
@@ -586,6 +912,8 @@ export default function App() {
                 : `${totalCount.toLocaleString()} entries`
               : tab === 'saved'
               ? `${favCount} saved`
+              : tab === 'translate'
+              ? 'Online Translator'
               : 'Settings'}
           </Text>
           <View style={S.countLine} />
@@ -794,6 +1122,10 @@ export default function App() {
         </ScrollView>
       )}
 
+      {tab === 'translate' && (
+        <TranslateTab C={C} fontFamily={fontFamily} textScale={textScale} />
+      )}
+
       {/* ══ TAB BAR ══════════════════════════════════════════════════════════ */}
       <View style={S.tabBar}>
         <Animated.View
@@ -802,18 +1134,19 @@ export default function App() {
             {
               transform: [{
                 translateX: tabAnim.interpolate({
-                  inputRange:  [0, 1, 2],
-                  outputRange: [SW / 3 * 0, SW / 3 * 1, SW / 3 * 2],
+                  inputRange:  [0, 1, 2, 3],
+                  outputRange: [SW / 4 * 0, SW / 4 * 1, SW / 4 * 2, SW / 4 * 3],
                 }),
               }],
             },
           ]}
         />
         {([
-          ['search',   ICO_SEARCH,  'Search'],
-          ['saved',    ICO_SAVE,    'Saved'],
-          ['settings', ICO_SETTING, 'Settings'],
-        ] as [Tab, any, string][]).map(([t, ico, label]) => {
+          ['search',    ICO_SEARCH,  'Search',    null ],
+          ['saved',     ICO_SAVE,    'Saved',     null ],
+          ['translate', null,        'Translate', '🌐' ],
+          ['settings',  ICO_SETTING, 'Settings',  null ],
+        ] as [Tab, any, string, string|null][]).map(([t, ico, label, emoji]) => {
           const active = tab === t;
           return (
             <TouchableOpacity
@@ -822,12 +1155,15 @@ export default function App() {
               onPress={() => switchTab(t)}
               activeOpacity={0.6}
             >
-              <Image
-                source={ico}
-                style={[S.tabIcon, { tintColor: active ? C.accent : C.text3 }]}
-                resizeMode="contain"
-              />
-              {/* FIX: fontFamily on tab labels */}
+              {emoji ? (
+                <Text style={[S.tabIcon, { fontSize: 20, lineHeight: 22, textAlign: 'center', color: active ? C.accent : C.text3 }]}>{emoji}</Text>
+              ) : (
+                <Image
+                  source={ico}
+                  style={[S.tabIcon, { tintColor: active ? C.accent : C.text3 }]}
+                  resizeMode="contain"
+                />
+              )}
               <Text style={[S.tabLabel, active && S.tabLabelActive, { fontFamily }]}>{label}</Text>
               {t === 'saved' && favCount > 0 && (
                 <View style={S.tabBadge}>
@@ -1089,7 +1425,7 @@ const getStyles = (C: any, sc: number, fn: string) => StyleSheet.create({
   },
   tabIndicator: {
     position: 'absolute', top: 0, left: 0,
-    width: SW / 3, height: 3,
+    width: SW / 4, height: 3,
     borderRadius: 2,
     backgroundColor: C.accent,
     shadowColor: C.accent, shadowOffset: { width: 0, height: 2 },
@@ -1103,7 +1439,7 @@ const getStyles = (C: any, sc: number, fn: string) => StyleSheet.create({
   tabLabel:      { fontSize: 10 * sc, fontFamily: fn, fontWeight: '600', color: C.text3, letterSpacing: 0.4 },
   tabLabelActive:{ color: C.accent, fontWeight: '800' },
   tabBadge: {
-    position: 'absolute', top: 8, right: SW / 3 / 2 - 22,
+    position: 'absolute', top: 8, right: SW / 4 / 2 - 22,
     backgroundColor: C.accent, borderRadius: 8, paddingHorizontal: 4,
     minWidth: 15, height: 15, alignItems: 'center', justifyContent: 'center',
   },
