@@ -86,6 +86,10 @@ const MODES: { key: SearchMode; label: string; from: string; to: string }[] = [
 
 const ALL_KEYS = MODES.map(m => m.key) as SearchMode[];
 
+// ─── Tab list (module-level so switchTab never has a stale closure) ───────────
+
+const TAB_LIST: Tab[] = ['search', 'saved', 'translate', 'settings'];
+
 // ─── Online Translator Languages ─────────────────────────────────────────────
 
 const TRANSLATE_LANGS: { name: string; code: string }[] = [
@@ -140,9 +144,62 @@ const TRANSLATE_LANGS: { name: string; code: string }[] = [
   { name: 'Yiddish',               code: 'yi'    },
 ];
 
-// ─── Translate Tab Component ──────────────────────────────────────────────────
+// ─── Language Picker Modal (module-level — never re-created) ─────────────────
 
 interface LangOption { name: string; code: string; }
+
+const LangPickerModal: React.FC<{
+  visible: boolean;
+  onClose: () => void;
+  title: string;
+  selected: LangOption;
+  onSelect: (l: LangOption) => void;
+  allowAuto?: boolean;
+  C: any;
+  fontFamily: string;
+}> = React.memo(({ visible, onClose, title, selected, onSelect, allowAuto, C, fontFamily }) => (
+  <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
+    <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.65)' }}>
+      <Pressable style={StyleSheet.absoluteFillObject} onPress={onClose} />
+      <View style={{ backgroundColor: C.card, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingTop: 12, maxHeight: '75%' }}>
+        <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.15)', alignSelf: 'center', marginBottom: 16 }} />
+        <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 12, gap: 10 }}>
+          <Text style={{ fontSize: 16, color: C.accent }}>🌐</Text>
+          <Text style={{ fontSize: 16, fontWeight: '900', color: C.text1, fontFamily }}>{title}</Text>
+        </View>
+        <ScrollView showsVerticalScrollIndicator={false}>
+          {TRANSLATE_LANGS.filter(l => allowAuto || l.code !== 'auto').map(l => {
+            const active = selected.code === l.code;
+            return (
+              <TouchableOpacity
+                key={l.code}
+                style={[{
+                  flexDirection: 'row', alignItems: 'center',
+                  paddingHorizontal: 16, paddingVertical: 14,
+                  borderRadius: 12, marginBottom: 5, marginHorizontal: 10,
+                  borderWidth: 1,
+                }, active
+                  ? { backgroundColor: C.accentDim,  borderColor: C.accentBorder }
+                  : { backgroundColor: C.surface,    borderColor: 'transparent'  }
+                ]}
+                onPress={() => { onSelect(l); onClose(); }}
+                activeOpacity={0.7}
+              >
+                <Text style={{ flex: 1, fontSize: 15, fontWeight: '700', color: active ? C.accent : C.text1, fontFamily }}>
+                  {l.name}
+                </Text>
+                {active && <Text style={{ fontSize: 16, color: C.accent, fontWeight: '900' }}>✓</Text>}
+              </TouchableOpacity>
+            );
+          })}
+          <View style={{ height: 32 }} />
+        </ScrollView>
+      </View>
+    </View>
+  </Modal>
+));
+
+// ─── Translate Tab Component ──────────────────────────────────────────────────
 
 const TranslateTab: React.FC<{ C: any; fontFamily: string; textScale: number }> = ({
   C, fontFamily, textScale: sc,
@@ -156,19 +213,28 @@ const TranslateTab: React.FC<{ C: any; fontFamily: string; textScale: number }> 
   const [toPicker,   setToPicker]     = useState(false);
   const [error,      setError]        = useState('');
 
+  // Abort previous in-flight request on each new call (prevents stale results)
+  const abortRef      = useRef<AbortController | null>(null);
+  const translateTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const doTranslate = useCallback(async (text: string, from: string, to: string) => {
-    if (!text.trim()) { setOutputText(''); return; }
+    if (!text.trim()) { setOutputText(''); setTranslating(false); return; }
+    // Cancel any previous in-flight fetch
+    abortRef.current?.abort();
+    abortRef.current = new AbortController();
     setTranslating(true);
     setError('');
     try {
       const url =
         `https://translate.googleapis.com/translate_a/single?client=gtx` +
         `&sl=${from}&tl=${to}&dt=t&q=${encodeURIComponent(text)}`;
-      const res  = await fetch(url);
+      const res  = await fetch(url, { signal: abortRef.current.signal });
       const json = await res.json();
       setOutputText(json[0].map((item: any) => item[0]).join(''));
-    } catch {
-      setError('Translation failed. Please check your connection.');
+    } catch (e: any) {
+      if (e?.name !== 'AbortError') {
+        setError('Translation failed. Please check your connection.');
+      }
     } finally {
       setTranslating(false);
     }
@@ -183,62 +249,23 @@ const TranslateTab: React.FC<{ C: any; fontFamily: string; textScale: number }> 
     setOutputText(inputText);
   };
 
+  // Debounce auto-translate: 500 ms after user stops typing
   const handleInputChange = (t: string) => {
     const limited = t.slice(0, 5000);
     setInputText(limited);
-    if (limited.length > 2) doTranslate(limited, fromLang.code, toLang.code);
-    else setOutputText('');
+    if (translateTimer.current) clearTimeout(translateTimer.current);
+    if (limited.length > 2) {
+      translateTimer.current = setTimeout(() => {
+        doTranslate(limited, fromLang.code, toLang.code);
+      }, 500);
+    } else {
+      setOutputText('');
+      setTranslating(false);
+    }
   };
 
   const card    = { backgroundColor: C.card,    borderRadius: 16, borderWidth: 1 as any, borderColor: C.border    };
   const surface = { backgroundColor: C.surface, borderRadius: 12, borderWidth: 1 as any, borderColor: C.borderMid };
-
-  const LangPicker = ({
-    visible, onClose, title, selected, onSelect, allowAuto,
-  }: {
-    visible: boolean; onClose: () => void; title: string;
-    selected: LangOption; onSelect: (l: LangOption) => void; allowAuto?: boolean;
-  }) => (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <View style={{ flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.65)' }}>
-        <Pressable style={StyleSheet.absoluteFillObject} onPress={onClose} />
-        <View style={{ backgroundColor: C.card, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingTop: 12, maxHeight: '75%' }}>
-          <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.15)', alignSelf: 'center', marginBottom: 16 }} />
-          <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 12, gap: 10 }}>
-            <Text style={{ fontSize: 16, color: C.accent }}>🌐</Text>
-            <Text style={{ fontSize: 16, fontWeight: '900', color: C.text1, fontFamily }}>{title}</Text>
-          </View>
-          <ScrollView showsVerticalScrollIndicator={false}>
-            {TRANSLATE_LANGS.filter(l => allowAuto || l.code !== 'auto').map(l => {
-              const active = selected.code === l.code;
-              return (
-                <TouchableOpacity
-                  key={l.code}
-                  style={[{
-                    flexDirection: 'row', alignItems: 'center',
-                    paddingHorizontal: 16, paddingVertical: 14,
-                    borderRadius: 12, marginBottom: 5, marginHorizontal: 10,
-                    borderWidth: 1,
-                  }, active
-                    ? { backgroundColor: C.accentDim,  borderColor: C.accentBorder }
-                    : { backgroundColor: C.surface,    borderColor: 'transparent'  }
-                  ]}
-                  onPress={() => { onSelect(l); onClose(); }}
-                  activeOpacity={0.7}
-                >
-                  <Text style={{ flex: 1, fontSize: 15, fontWeight: '700', color: active ? C.accent : C.text1, fontFamily }}>
-                    {l.name}
-                  </Text>
-                  {active && <Text style={{ fontSize: 16, color: C.accent, fontWeight: '900' }}>✓</Text>}
-                </TouchableOpacity>
-              );
-            })}
-            <View style={{ height: 32 }} />
-          </ScrollView>
-        </View>
-      </View>
-    </Modal>
-  );
 
   return (
     <>
@@ -374,24 +401,30 @@ const TranslateTab: React.FC<{ C: any; fontFamily: string; textScale: number }> 
         </Text>
       </ScrollView>
 
-      <LangPicker
+      <LangPickerModal
         visible={fromPicker}
         onClose={() => setFromPicker(false)}
         title="Translate From"
         selected={fromLang}
         allowAuto
+        C={C}
+        fontFamily={fontFamily}
         onSelect={l => {
           setFromLang(l);
+          if (translateTimer.current) clearTimeout(translateTimer.current);
           doTranslate(inputText, l.code, toLang.code);
         }}
       />
-      <LangPicker
+      <LangPickerModal
         visible={toPicker}
         onClose={() => setToPicker(false)}
         title="Translate To"
         selected={toLang}
+        C={C}
+        fontFamily={fontFamily}
         onSelect={l => {
           setToLang(l);
+          if (translateTimer.current) clearTimeout(translateTimer.current);
           doTranslate(inputText, fromLang.code, l.code);
         }}
       />
@@ -599,8 +632,8 @@ export default function App() {
   const listRef   = useRef<FlatList>(null);
   const focusAnim = useRef(new Animated.Value(0)).current;
 
-  const TAB_LIST: Tab[] = ['search', 'saved', 'translate', 'settings'];
-  const tabAnim  = useRef(new Animated.Value(0)).current;
+  const tabAnim      = useRef(new Animated.Value(0)).current;
+  const searchTimer  = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const switchTab = useCallback((t: Tab) => {
     setTab(t);
@@ -659,21 +692,33 @@ export default function App() {
     })();
   }, []);
 
+  // Search effect — 80 ms debounce keeps input snappy; instant on clear/mode/cat change
   useEffect(() => {
     if (loading) return;
     const idx = indexCache[mode];
     if (!idx) return;
     setLimit(300);
-    setResults(doSearch(idx, query, filterCat, 300));
-    listRef.current?.scrollToOffset({ offset: 0, animated: false });
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    if (!query) {
+      // Clear is instant — no debounce needed
+      setResults(doSearch(idx, '', filterCat, 300));
+      listRef.current?.scrollToOffset({ offset: 0, animated: false });
+    } else {
+      searchTimer.current = setTimeout(() => {
+        setResults(doSearch(idx, query, filterCat, 300));
+        listRef.current?.scrollToOffset({ offset: 0, animated: false });
+      }, 80);
+    }
+    return () => { if (searchTimer.current) clearTimeout(searchTimer.current); };
   }, [query, mode, filterCat]);
 
+  // Load-more effect — include query+filterCat so stale closures never return wrong results
   useEffect(() => {
     if (loading || limit === 300) return;
     const idx = indexCache[mode];
     if (!idx) return;
     setResults(doSearch(idx, query, filterCat, limit));
-  }, [limit]);
+  }, [limit, query, filterCat, mode]);
 
   const switchMode = useCallback((m: SearchMode) => {
     setMode(m);
@@ -683,19 +728,32 @@ export default function App() {
     loadMode(m, '');
   }, [loadMode]);
 
-  const saveFavs = (map: Record<string, boolean>) => {
+  const saveFavs = useCallback((map: Record<string, boolean>) => {
     setFavorites(map);
     AsyncStorage.setItem('favorites', JSON.stringify(map));
-  };
-  const saveRecents = (arr: string[]) => {
+  }, []);
+
+  const saveRecents = useCallback((arr: string[]) => {
     setRecents(arr);
     AsyncStorage.setItem('recents', JSON.stringify(arr));
-  };
-  const toggleFav = (id: string) => saveFavs({ ...favorites, [id]: !favorites[id] });
-  const addRecent = (t: string) => {
+  }, []);
+
+  const toggleFav = useCallback((id: string) => {
+    setFavorites(prev => {
+      const next = { ...prev, [id]: !prev[id] };
+      AsyncStorage.setItem('favorites', JSON.stringify(next));
+      return next;
+    });
+  }, []);
+
+  const addRecent = useCallback((t: string) => {
     if (!t.trim()) return;
-    saveRecents([t, ...recents.filter(r => r !== t)].slice(0, 10));
-  };
+    setRecents(prev => {
+      const next = [t, ...prev.filter(r => r !== t)].slice(0, 10);
+      AsyncStorage.setItem('recents', JSON.stringify(next));
+      return next;
+    });
+  }, []);
 
   const activeMode = useMemo(() => MODES.find(m => m.key === mode)!, [mode]);
   const favCount = useMemo(() => Object.values(favorites).filter(Boolean).length, [favorites]);
@@ -765,7 +823,7 @@ export default function App() {
         </TouchableOpacity>
       </View>
     );
-  }, [favorites, query, fontFamily, S, isLightMode]);
+  }, [favorites, query, fontFamily, S, isLightMode, toggleFav]);
 
   const keyExtractor = useCallback((item: Entry) => item.ID, []);
 
