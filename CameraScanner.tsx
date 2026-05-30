@@ -546,7 +546,7 @@ export default function CameraScanner({ onTextDetected, onClose, lookupWord, acc
   }
 
   // Estimated aspect label
-  const aspectLabel=corners.length===4&&captured?()=>{
+  const aspectLabel=corners.length===4&&captured?(() => {
     const d01=Math.hypot(corners[1].x-corners[0].x,corners[1].y-corners[0].y);
     const d03=Math.hypot(corners[3].x-corners[0].x,corners[3].y-corners[0].y);
     const ratio=d01/d03;
@@ -555,7 +555,7 @@ export default function CameraScanner({ onTextDetected, onClose, lookupWord, acc
     if(Math.abs(ratio-1.586)<0.12) return 'ID Card (CR80)';
     if(Math.abs(ratio-1)<0.1) return 'Square';
     return `${ratio.toFixed(2)} : 1`;
-  }():null;
+  })():null;
 
   const loupeRight  = dragIdx===1||dragIdx===2;
   const loupeBottom = dragIdx===2||dragIdx===3;
