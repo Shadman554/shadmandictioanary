@@ -11,6 +11,7 @@
 import React, {
   useEffect, useRef, useState, useCallback, useMemo,
 } from 'react';
+import CameraScanner from './CameraScanner';
 import {
   SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput,
   View, TouchableOpacity, FlatList, Modal, Pressable, Animated,
@@ -626,6 +627,7 @@ export default function App() {
   const [focused,     setFocused]     = useState(false);
   const [filterCat,   setFilterCat]   = useState<string | null>(null);
   const [limit,       setLimit]       = useState(300);
+  const [showCamera,  setShowCamera]  = useState(false);
 
   const C = useMemo(() => getColors(isLightMode), [isLightMode]);
   const S = useMemo(() => getStyles(C, textScale, fontFamily), [C, textScale, fontFamily]);
@@ -912,6 +914,15 @@ export default function App() {
                     </View>
                   </TouchableOpacity>
                 )}
+                <TouchableOpacity
+                  onPress={() => setShowCamera(true)}
+                  hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+                  style={{ marginLeft: 6 }}
+                >
+                  <View style={S.camBtn}>
+                    <Text style={[S.camBtnText, { fontFamily }]}>📷</Text>
+                  </View>
+                </TouchableOpacity>
               </Animated.View>
 
               <TouchableOpacity style={S.modePill} onPress={() => setModePicker(true)} activeOpacity={0.75}>
@@ -1310,6 +1321,21 @@ export default function App() {
           </View>
         </View>
       </Modal>
+
+      {showCamera && (
+        <CameraScanner
+          onTextDetected={(text) => {
+            setQuery(text.split(/\s+/)[0] || text);
+            if (tab !== 'search') switchTab('search');
+          }}
+          onClose={() => setShowCamera(false)}
+          accentColor={C.accent}
+          bgColor={C.bg}
+          cardColor={C.card}
+          textColor={C.text1}
+          text3Color={C.text3}
+        />
+      )}
     </SafeAreaView>
   );
 }
@@ -1574,4 +1600,12 @@ const getStyles = (C: any, sc: number, fn: string) => StyleSheet.create({
   catChipActive: { backgroundColor: C.accentDim, borderColor: C.accent },
   catTx:         { color: C.text3, fontSize: 13 * sc, fontWeight: '700', fontFamily: fn },
   catTxActive:   { color: C.accentLight, fontWeight: '900' },
+
+  camBtn: {
+    width: 30, height: 30, borderRadius: 8,
+    backgroundColor: C.accentDim,
+    borderWidth: 1.5, borderColor: C.accentBorder,
+    justifyContent: 'center', alignItems: 'center',
+  },
+  camBtnText: { fontSize: 14, lineHeight: 16 },
 });
