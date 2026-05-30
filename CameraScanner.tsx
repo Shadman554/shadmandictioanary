@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { createWorker, Worker } from 'tesseract.js';
+import { CloseIcon, FlipCameraIcon } from './Icons';
 
 interface DetectedWord {
   text: string;
@@ -253,7 +254,7 @@ export default function CameraScanner({
         backdropFilter: 'blur(8px)',
         zIndex: 2,
       }}>
-        <button onClick={onClose} style={btnStyle}>✕</button>
+        <button onClick={onClose} style={btnStyle}><CloseIcon size={18} color="#fff" /></button>
         <div style={{ textAlign: 'center' }}>
           <div style={{ color: '#fff', fontWeight: 700, fontSize: 15 }}>Live Text Scanner</div>
           <div style={{
@@ -264,7 +265,7 @@ export default function CameraScanner({
             {statusMsg}
           </div>
         </div>
-        <button onClick={flipCamera} style={btnStyle} title="Flip camera">🔄</button>
+        <button onClick={flipCamera} style={btnStyle} title="Flip camera"><FlipCameraIcon size={20} color="#fff" /></button>
       </div>
 
       {/* Camera + overlay */}
