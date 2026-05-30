@@ -13,6 +13,10 @@ import React, {
 } from 'react';
 import CameraScanner from './CameraScanner';
 import {
+  CameraIcon, GlobeIcon, CloseIcon, SunIcon, MoonIcon,
+  ChevronDownIcon, SearchIcon,
+} from './Icons';
+import {
   SafeAreaView, ScrollView, StatusBar, StyleSheet, Text, TextInput,
   View, TouchableOpacity, FlatList, Modal, Pressable, Animated,
   Platform, ActivityIndicator, Dimensions, Image,
@@ -165,7 +169,7 @@ const LangPickerModal: React.FC<{
       <View style={{ backgroundColor: C.card, borderTopLeftRadius: 24, borderTopRightRadius: 24, paddingTop: 12, maxHeight: '75%' }}>
         <View style={{ width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.15)', alignSelf: 'center', marginBottom: 16 }} />
         <View style={{ flexDirection: 'row', alignItems: 'center', paddingHorizontal: 18, marginBottom: 12, gap: 10 }}>
-          <Text style={{ fontSize: 16, color: C.accent }}>🌐</Text>
+          <GlobeIcon size={16} color={C.accent} />
           <Text style={{ fontSize: 16, fontWeight: '900', color: C.text1, fontFamily }}>{title}</Text>
         </View>
         <ScrollView showsVerticalScrollIndicator={false}>
@@ -325,8 +329,10 @@ const TranslateTab: React.FC<{ C: any; fontFamily: string; textScale: number }> 
           />
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 16, paddingBottom: 12 }}>
             {inputText ? (
-              <TouchableOpacity onPress={() => { setInputText(''); setOutputText(''); setError(''); }}>
-                <Text style={{ fontSize: 12, fontWeight: '700', color: C.text2, fontFamily }}>✕ Clear</Text>
+              <TouchableOpacity onPress={() => { setInputText(''); setOutputText(''); setError(''); }}
+                style={{ flexDirection: 'row', alignItems: 'center', gap: 4 }}>
+                <CloseIcon size={11} color={C.text2} />
+                <Text style={{ fontSize: 12, fontWeight: '700', color: C.text2, fontFamily }}>Clear</Text>
               </TouchableOpacity>
             ) : <View />}
             <Text style={{ fontSize: 11, color: C.text3, fontFamily }}>{inputText.length} / 5000</Text>
@@ -345,7 +351,7 @@ const TranslateTab: React.FC<{ C: any; fontFamily: string; textScale: number }> 
           disabled={!inputText.trim() || translating}
           activeOpacity={0.75}
         >
-          <Text style={{ fontSize: 20 }}>🌐</Text>
+          <GlobeIcon size={20} color="#fff" />
           <Text style={{ color: '#fff', fontFamily, fontSize: 15, fontWeight: '800' }}>
             {translating ? 'Translating…' : 'Translate'}
           </Text>
@@ -890,7 +896,7 @@ export default function App() {
                 },
               ]}>
                 {/* FIX: fontFamily on all header Text nodes */}
-                <Text style={[S.searchIcon, { fontFamily }]}>⌕</Text>
+                <SearchIcon size={17} color={C.text2} style={{ marginRight: 8 }} />
                 <TextInput
                   style={[S.input, { fontFamily }]}
                   value={query}
@@ -910,7 +916,7 @@ export default function App() {
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                   >
                     <View style={S.clearX}>
-                      <Text style={[S.clearXText, { fontFamily }]}>✕</Text>
+                      <CloseIcon size={10} color={C.text2} />
                     </View>
                   </TouchableOpacity>
                 )}
@@ -920,14 +926,14 @@ export default function App() {
                   style={{ marginLeft: 6 }}
                 >
                   <View style={S.camBtn}>
-                    <Text style={[S.camBtnText, { fontFamily }]}>📷</Text>
+                    <CameraIcon size={15} color={C.accent} />
                   </View>
                 </TouchableOpacity>
               </Animated.View>
 
               <TouchableOpacity style={S.modePill} onPress={() => setModePicker(true)} activeOpacity={0.75}>
                 <Text style={[S.modePillText, { fontFamily }]}>{activeMode.label}</Text>
-                <Text style={[S.modePillArrow, { fontFamily }]}>▼</Text>
+                <ChevronDownIcon size={9} color={C.accentSoft} />
               </TouchableOpacity>
             </>
           )}
@@ -1113,7 +1119,9 @@ export default function App() {
           <View style={S.card}>
             <TouchableOpacity style={S.settRow} onPress={() => { setIsLightMode(!isLightMode); AsyncStorage.setItem('isLightMode', (!isLightMode).toString()); }} activeOpacity={0.7}>
               <View style={[S.settRowIcon, { backgroundColor: isLightMode ? '#CBD5E1' : '#334155' }]}>
-                <Text style={S.settRowIconTx}>{isLightMode ? '☀️' : '🌙'}</Text>
+                {isLightMode
+                  ? <SunIcon size={18} color="#F59E0B" />
+                  : <MoonIcon size={18} color="#94A3B8" />}
               </View>
               <View style={{ flex: 1 }}>
                 <Text style={[S.settTitle, { fontFamily }]}>{isLightMode ? 'Light Mode' : 'Dark Mode'}</Text>
@@ -1213,7 +1221,7 @@ export default function App() {
         {([
           ['search',    ICO_SEARCH,  'Search',    null ],
           ['saved',     ICO_SAVE,    'Saved',     null ],
-          ['translate', null,        'Translate', '🌐' ],
+          ['translate', null,        'Translate', 'globe' ],
           ['settings',  ICO_SETTING, 'Settings',  null ],
         ] as [Tab, any, string, string|null][]).map(([t, ico, label, emoji]) => {
           const active = tab === t;
@@ -1224,7 +1232,9 @@ export default function App() {
               onPress={() => switchTab(t)}
               activeOpacity={0.6}
             >
-              {emoji ? (
+              {emoji === 'globe' ? (
+                <GlobeIcon size={22} color={active ? C.accent : C.text3} />
+              ) : emoji ? (
                 <Text style={[S.tabIcon, { fontSize: 20, lineHeight: 22, textAlign: 'center', color: active ? C.accent : C.text3 }]}>{emoji}</Text>
               ) : (
                 <Image
@@ -1252,7 +1262,7 @@ export default function App() {
           <View style={[S.sheet, { backgroundColor: C.card }]}>
             <View style={S.sheetHandle} />
             <View style={S.sheetTitleBar}>
-              <Text style={[S.sheetTitleIcon, { fontFamily }]}>🌐</Text>
+              <GlobeIcon size={16} color={C.accent} />
               <Text style={[S.sheetTitle, { fontFamily }]}>Dictionary Language</Text>
             </View>
             <ScrollView showsVerticalScrollIndicator={false}>
