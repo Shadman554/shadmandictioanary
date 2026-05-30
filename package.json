@@ -1,5 +1,5 @@
 {
-  "name": "ShadmanDictionaryNew",
+  "name": "ShadmanDictionary",
   "version": "0.0.1",
   "private": true,
   "scripts": {
@@ -7,12 +7,19 @@
     "ios": "react-native run-ios",
     "lint": "eslint .",
     "start": "react-native start",
-    "test": "jest"
+    "test": "jest",
+    "convert-csv": "node tools/csvToJson.js && copy \"data\\json\\*.json\" \"assets\\data\\\"",
+    "convert-csv-single": "node tools/csvToJson.js"
   },
   "dependencies": {
+    "@react-native-async-storage/async-storage": "^2.2.0",
+    "@react-native-community/blur": "^4.4.1",
+    "@react-native/new-app-screen": "0.80.2",
     "react": "19.1.0",
     "react-native": "0.80.2",
-    "@react-native/new-app-screen": "0.80.2"
+    "react-native-haptic-feedback": "^2.3.3",
+    "react-native-linear-gradient": "^2.8.3",
+    "react-native-vector-icons": "^10.3.0"
   },
   "devDependencies": {
     "@babel/core": "^7.25.2",
