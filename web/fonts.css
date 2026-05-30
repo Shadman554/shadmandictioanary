@@ -1,0 +1,97 @@
+@font-face {
+  font-family: 'سیروان';
+  src: url('../assets/fonts/سیروان.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'فۆنتی ئێن ئارتی';
+  src: url('../assets/fonts/فۆنتی ئێن ئارتی.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'فۆنتی ئێن ئارتی ب';
+  src: url('../assets/fonts/فۆنتی ئێن ئارتی ب.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'فۆنتی ڕووداو';
+  src: url('../assets/fonts/فۆنتی ڕووداو.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'فۆنتی ڕووداو ب';
+  src: url('../assets/fonts/فۆنتی ڕووداو ب.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'ماڵپەری خەندان';
+  src: url('../assets/fonts/ماڵپەری خەندان.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'ماڵپەری خەندان ب';
+  src: url('../assets/fonts/ماڵپەری خەندان ب.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'نێت تی ڤی';
+  src: url('../assets/fonts/نێت تی ڤی.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'نێت تی ڤی ب';
+  src: url('../assets/fonts/نێت تی ڤی ب.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'کۆمار';
+  src: url('../assets/fonts/کۆمار.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'کەناڵی  کوردستان ٢٤';
+  src: url('../assets/fonts/کەناڵی  کوردستان ٢٤.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'کەناڵی  کوردستان ٢٤ب';
+  src: url('../assets/fonts/کەناڵی  کوردستان ٢٤ب.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'کەناڵی سپێدە';
+  src: url('../assets/fonts/کەناڵی سپێدە.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}
+
+@font-face {
+  font-family: 'کەناڵی سپێدە ب';
+  src: url('../assets/fonts/کەناڵی سپێدە ب.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+}

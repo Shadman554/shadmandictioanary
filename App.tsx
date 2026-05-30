@@ -274,7 +274,7 @@ export default function App() {
   const [recents, setRecents]     = useState<string[]>([]);
   const [modePicker,  setModePicker]  = useState(false);
   const [fontPicker,  setFontPicker]  = useState(false);
-  const [fontFamily,  setFontFamily]  = useState<string>('NRT-Regular');
+  const [fontFamily,  setFontFamily]  = useState<string>('فۆنتی ئێن ئارتی');
   const [isLightMode, setIsLightMode] = useState<boolean>(false);
   const [textScale,   setTextScale]   = useState<number>(1);
   const [focused,     setFocused]     = useState(false);
