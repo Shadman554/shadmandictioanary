@@ -52,41 +52,609 @@ function rotateCanvas(src: HTMLCanvasElement, deg: 90 | -90): HTMLCanvasElement 
   return c;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared box-blur (used by both detectors)
+function _boxBlur(src: Uint8Array, w: number, h: number, r: number): Uint8Array {
+  const tmp = new Uint8Array(w*h), out = new Uint8Array(w*h);
+  for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
+    let s=0,n=0;
+    for (let dx=-r;dx<=r;dx++){const nx=x+dx;if(nx>=0&&nx<w){s+=src[y*w+nx];n++;}}
+    tmp[y*w+x]=(s/n)|0;
+  }
+  for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
+    let s=0,n=0;
+    for (let dy=-r;dy<=r;dy++){const ny=y+dy;if(ny>=0&&ny<h){s+=tmp[ny*w+x];n++;}}
+    out[y*w+x]=(s/n)|0;
+  }
+  return out;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Method 1 – Texture-aware paper detection + RANSAC (primary)
+//
+//  Key insight: paper has TEXT = dense Sobel edges internally.
+//  Plain walls, tables, and background have NO internal edges even if bright.
+//  This distinguishes paper from bright backgrounds that fool pure brightness.
+//
+//  Steps:
+//  1. Grayscale (raw for edges, blurred for threshold)
+//  2. YCbCr skin mask → exclude hand/face before thresholding
+//  3. Sobel edge map + integral image for fast area queries
+//  4. Otsu threshold on non-skin → brightness mask
+//  5. Paper mask = bright AND not skin AND has ≥4 edges in 13×13 window
+//  6. Boundary scan on paper mask
+//  7. RANSAC line fit on each boundary (handles partial hand occlusion)
+//  8. Intersect 4 lines → 4 corners
+// ─────────────────────────────────────────────────────────────────────────────
+function _brightBoundary(canvas: HTMLCanvasElement): Corner[] | null {
+  const small = scaleCanvas(canvas, 512);
+  const w = small.width, h = small.height;
+  const invS = canvas.width / w;
+  const d = small.getContext('2d')!.getImageData(0,0,w,h).data;
+
+  // ── 1. Grayscale ───────────────────────────────────────────────────────────
+  const rawG = new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++) rawG[i]=(d[i*4]*77+d[i*4+1]*150+d[i*4+2]*29)>>8;
+  const blG = _boxBlur(rawG,w,h,3);
+
+  // ── 2. YCbCr skin mask ────────────────────────────────────────────────────
+  const skin = new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++){
+    const r=d[i*4],g=d[i*4+1],b=d[i*4+2];
+    const cr=((112*r-94*g-18*b+128)>>8)+128;
+    const cb=((-38*r-74*g+112*b+128)>>8)+128;
+    if(cr>=133&&cr<=177&&cb>=77&&cb<=127) skin[i]=1;
+  }
+
+  // ── 3. Variance integral images for texture detection ─────────────────────
+  //   Paper has TEXT → high local pixel variance (dark ink on white background).
+  //   Plain walls/backgrounds → near-zero variance (just camera noise).
+  //   Unlike Sobel edge thresholding, variance does NOT depend on a global
+  //   threshold that gets inflated by strong edges elsewhere in the scene.
+  const intgS  = new Int32Array((w+1)*(h+1));    // Σ of rawG
+  const intgS2 = new Float32Array((w+1)*(h+1));  // Σ of rawG² (Float to avoid overflow)
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const v=rawG[y*w+x];
+    intgS [(y+1)*(w+1)+(x+1)] = v   + intgS [(y+1)*(w+1)+x] + intgS [y*(w+1)+(x+1)] - intgS [y*(w+1)+x];
+    intgS2[(y+1)*(w+1)+(x+1)] = v*v + intgS2[(y+1)*(w+1)+x] + intgS2[y*(w+1)+(x+1)] - intgS2[y*(w+1)+x];
+  }
+  const qVar=(x1:number,y1:number,x2:number,y2:number)=>{
+    const n=(x2-x1)*(y2-y1);
+    const s  = intgS [y2*(w+1)+x2]-intgS [y1*(w+1)+x2]-intgS [y2*(w+1)+x1]+intgS [y1*(w+1)+x1];
+    const s2 = intgS2[y2*(w+1)+x2]-intgS2[y1*(w+1)+x2]-intgS2[y2*(w+1)+x1]+intgS2[y1*(w+1)+x1];
+    const mean=s/n; return s2/n-mean*mean;
+  };
+
+  // ── 5. Otsu on non-skin pixels ─────────────────────────────────────────────
+  const hist=new Int32Array(256); let nTot=0;
+  for(let i=0;i<w*h;i++) if(!skin[i]){hist[blG[i]]++;nTot++;}
+  if(nTot<w*h*0.15) return null;
+  let sum=0; for(let i=0;i<256;i++) sum+=i*hist[i];
+  let sB=0,wB=0,mxV=0,th=128;
+  for(let t=0;t<256;t++){
+    wB+=hist[t]; if(!wB) continue;
+    const wF=nTot-wB; if(!wF) break;
+    sB+=t*hist[t];
+    const mB=sB/wB,mF=(sum-sB)/wF,v=wB*wF*(mB-mF)*(mB-mF);
+    if(v>mxV){mxV=v;th=t;}
+  }
+
+  // ── 6. Paper mask: bright AND not skin AND has text texture ────────────────
+  //   Text texture = local variance ≥ 60 in a 17×17 window (σ ≥ ~7.7 gray levels).
+  //   • Printed paper at normal distance: σ ≈ 15–50 → variance 225–2500 ✓
+  //   • Plain wall / table: σ ≈ 2–5  → variance 4–25 ✗
+  //   Fallback: if texture mask is too sparse, try pure brightness but only
+  //   when the bright region is ≤60% of non-skin area (won't grab entire room).
+  const WIN=8; // half-width → 17×17 window (captures several text characters)
+  const MIN_VAR=60;
+  const paper=new Uint8Array(w*h); let pCnt=0;
+  for(let y=WIN;y<h-WIN;y++) for(let x=WIN;x<w-WIN;x++){
+    if(skin[y*w+x]||blG[y*w+x]<th) continue;
+    if(qVar(x-WIN,y-WIN,x+WIN+1,y+WIN+1)>=MIN_VAR){paper[y*w+x]=1;pCnt++;}
+  }
+  if(pCnt<w*h*0.04){
+    // Fallback: plain brightness (only when paper doesn't fill most of the scene)
+    pCnt=0;
+    for(let y=WIN;y<h-WIN;y++) for(let x=WIN;x<w-WIN;x++){
+      if(!skin[y*w+x]&&blG[y*w+x]>=th){paper[y*w+x]=1;pCnt++;}
+    }
+    if(pCnt<w*h*0.04||pCnt>nTot*0.60) return null;
+  }
+
+  // ── 7. Boundary scan on paper mask ────────────────────────────────────────
+  type Pt=[number,number];
+  const lPts:Pt[]=[], rPts:Pt[]=[], tPts:Pt[]=[], bPts:Pt[]=[];
+  for(let y=WIN+1;y<h-WIN-1;y++){
+    let lx=-1,rx=-1;
+    for(let x=WIN;x<w-WIN;x++) if(paper[y*w+x]){lx=x;break;}
+    for(let x=w-WIN-1;x>=WIN;x--) if(paper[y*w+x]){rx=x;break;}
+    if(lx>=0&&rx>lx&&(rx-lx)>w*0.10){lPts.push([lx,y]);rPts.push([rx,y]);}
+  }
+  for(let x=WIN+1;x<w-WIN-1;x++){
+    let ty=-1,by=-1;
+    for(let y=WIN;y<h-WIN;y++) if(paper[y*w+x]){ty=y;break;}
+    for(let y=h-WIN-1;y>=WIN;y--) if(paper[y*w+x]){by=y;break;}
+    if(ty>=0&&by>ty&&(by-ty)>h*0.10){tPts.push([x,ty]);bPts.push([x,by]);}
+  }
+  if(lPts.length<15||tPts.length<15) return null;
+
+  // ── 8. RANSAC robust line fitting ─────────────────────────────────────────
+  function ransacXY(pts:Pt[],iters=120,thr=4):{a:number,b:number}|null{
+    if(pts.length<8) return null;
+    let bN=0,bA=0,bB=0;
+    for(let it=0;it<iters;it++){
+      const i1=Math.floor(Math.random()*pts.length);
+      const i2=(i1+1+Math.floor(Math.random()*(pts.length-1)))%pts.length;
+      const[x1,y1]=pts[i1],[x2,y2]=pts[i2];
+      const dy=y2-y1; if(Math.abs(dy)<1) continue;
+      const ta=(x2-x1)/dy,tb=x1-ta*y1; let cnt=0;
+      for(const[x,y] of pts) if(Math.abs(x-(ta*y+tb))<=thr) cnt++;
+      if(cnt>bN){bN=cnt;bA=ta;bB=tb;}
+    }
+    if(bN<8) return null;
+    const ins=pts.filter(([x,y])=>Math.abs(x-(bA*y+bB))<=thr);
+    let sY=0,sX=0,s2Y=0,sXY=0,n=ins.length;
+    for(const[x,y] of ins){sY+=y;sX+=x;s2Y+=y*y;sXY+=x*y;}
+    const det=n*s2Y-sY*sY; if(Math.abs(det)<1e-6) return{a:bA,b:bB};
+    return{a:(n*sXY-sY*sX)/det,b:(sX*s2Y-sY*sXY)/det};
+  }
+  function ransacYX(pts:Pt[],iters=120,thr=4):{a:number,b:number}|null{
+    if(pts.length<8) return null;
+    let bN=0,bA=0,bB=0;
+    for(let it=0;it<iters;it++){
+      const i1=Math.floor(Math.random()*pts.length);
+      const i2=(i1+1+Math.floor(Math.random()*(pts.length-1)))%pts.length;
+      const[x1,y1]=pts[i1],[x2,y2]=pts[i2];
+      const dx=x2-x1; if(Math.abs(dx)<1) continue;
+      const ta=(y2-y1)/dx,tb=y1-ta*x1; let cnt=0;
+      for(const[x,y] of pts) if(Math.abs(y-(ta*x+tb))<=thr) cnt++;
+      if(cnt>bN){bN=cnt;bA=ta;bB=tb;}
+    }
+    if(bN<8) return null;
+    const ins=pts.filter(([x,y])=>Math.abs(y-(bA*x+bB))<=thr);
+    let sX=0,sY=0,s2X=0,sXY=0,n=ins.length;
+    for(const[x,y] of ins){sX+=x;sY+=y;s2X+=x*x;sXY+=x*y;}
+    const det=n*s2X-sX*sX; if(Math.abs(det)<1e-6) return{a:bA,b:bB};
+    return{a:(n*sXY-sX*sY)/det,b:(sY*s2X-sX*sXY)/det};
+  }
+
+  const left=ransacXY(lPts),right=ransacXY(rPts),top=ransacYX(tPts),bot=ransacYX(bPts);
+  if(!left||!right||!top||!bot) return null;
+
+  // ── 9. Intersect lines → corners ──────────────────────────────────────────
+  function ix(vl:{a:number,b:number},hl:{a:number,b:number}):[number,number]|null{
+    const det=1-vl.a*hl.a; if(Math.abs(det)<1e-6) return null;
+    const y=(hl.a*vl.b+hl.b)/det;
+    return[vl.a*y+vl.b,y];
+  }
+  const tlI=ix(left,top),trI=ix(right,top),brI=ix(right,bot),blI=ix(left,bot);
+  if(!tlI||!trI||!brI||!blI) return null;
+
+  const M=0.22,cW=canvas.width,cH=canvas.height;
+  const cc=([x,y]:[number,number]):Corner=>({
+    x:Math.max(-cW*M,Math.min(cW*(1+M),x*invS)),
+    y:Math.max(-cH*M,Math.min(cH*(1+M),y*invS)),
+  });
+  const cs=[cc(tlI),cc(trI),cc(brI),cc(blI)];
+  return cornersValid(cs,cW,cH)?cs:null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Method 2 – Weighted Hough + best quad (fallback)
+//   Finds the largest valid CONVEX quadrilateral with:
+//   • all 4 corners well-separated (no degenerate triangles)
+//   • all 4 corner angles between 40° and 140° (roughly rectangular)
+// ─────────────────────────────────────────────────────────────────────────────
+function _houghBoundary(canvas: HTMLCanvasElement): Corner[] | null {
+  const small = scaleCanvas(canvas, 600);
+  const w = small.width, h = small.height;
+  const invS = canvas.width / w;
+  const d = small.getContext('2d')!.getImageData(0,0,w,h).data;
+
+  // Grayscale + contrast stretch
+  const gray = new Uint8Array(w*h);
+  let gMin=255,gMax=0;
+  for (let i=0;i<w*h;i++){
+    const v=(d[i*4]*77+d[i*4+1]*150+d[i*4+2]*29)>>8;
+    gray[i]=v; if(v<gMin)gMin=v; if(v>gMax)gMax=v;
+  }
+  const gr=gMax-gMin||1;
+  for (let i=0;i<w*h;i++) gray[i]=((gray[i]-gMin)*255/gr)|0;
+
+  const blurred = _boxBlur(_boxBlur(gray,w,h,2),w,h,2);
+
+  // Sobel + NMS
+  const mag=new Float32Array(w*h), angA=new Float32Array(w*h);
+  for (let y=1;y<h-1;y++) for (let x=1;x<w-1;x++){
+    const gx=-blurred[(y-1)*w+x-1]+blurred[(y-1)*w+x+1]-2*blurred[y*w+x-1]+2*blurred[y*w+x+1]-blurred[(y+1)*w+x-1]+blurred[(y+1)*w+x+1];
+    const gy=-blurred[(y-1)*w+x-1]-2*blurred[(y-1)*w+x]-blurred[(y-1)*w+x+1]+blurred[(y+1)*w+x-1]+2*blurred[(y+1)*w+x]+blurred[(y+1)*w+x+1];
+    mag[y*w+x]=Math.sqrt(gx*gx+gy*gy); angA[y*w+x]=Math.atan2(gy,gx);
+  }
+  const nms=new Float32Array(w*h);
+  for (let y=1;y<h-1;y++) for (let x=1;x<w-1;x++){
+    const m=mag[y*w+x]; if(!m) continue;
+    const a=((angA[y*w+x]*180/Math.PI)+180)%180;
+    let n1:number,n2:number;
+    if(a<22.5||a>=157.5){n1=mag[y*w+x-1];n2=mag[y*w+x+1];}
+    else if(a<67.5){n1=mag[(y-1)*w+x+1];n2=mag[(y+1)*w+x-1];}
+    else if(a<112.5){n1=mag[(y-1)*w+x];n2=mag[(y+1)*w+x];}
+    else{n1=mag[(y-1)*w+x-1];n2=mag[(y+1)*w+x+1];}
+    if(m>=n1&&m>=n2) nms[y*w+x]=m;
+  }
+
+  // Hysteresis
+  const nv:number[]=[]; for(let i=0;i<w*h;i++) if(nms[i]>0) nv.push(nms[i]);
+  nv.sort((a,b)=>b-a);
+  const hiT=nv[Math.floor(nv.length*0.03)]??50, loT=hiT*0.30;
+  const strong=new Uint8Array(w*h), weak=new Uint8Array(w*h);
+  for(let i=0;i<w*h;i++){if(nms[i]>=hiT)strong[i]=1;else if(nms[i]>=loT)weak[i]=1;}
+  const edges=strong.slice();
+  for(let y=1;y<h-1;y++) for(let x=1;x<w-1;x++)
+    if(weak[y*w+x]&&!edges[y*w+x])
+      for(let dy=-1;dy<=1;dy++) for(let dx=-1;dx<=1;dx++)
+        if(strong[(y+dy)*w+(x+dx)]){edges[y*w+x]=1;}
+
+  // Weighted Hough (vote += NMS magnitude)
+  const NA=180, D=Math.ceil(Math.sqrt(w*w+h*h));
+  const acc=new Float32Array(NA*(2*D));
+  const cosT=new Float32Array(NA), sinT=new Float32Array(NA);
+  for(let a=0;a<NA;a++){const t=a*Math.PI/NA;cosT[a]=Math.cos(t);sinT[a]=Math.sin(t);}
+  for(let y=0;y<h;y++) for(let x=0;x<w;x++){
+    const ev=nms[y*w+x]; if(!edges[y*w+x]||ev<=0) continue;
+    for(let a=0;a<NA;a++){
+      const r=Math.round(x*cosT[a]+y*sinT[a])+D;
+      if(r>=0&&r<2*D) acc[a*(2*D)+r]+=ev;
+    }
+  }
+
+  // Extract up to 14 peaks
+  interface HL{a:number;r:number;votes:number;}
+  const peaks:HL[]=[];
+  const used=new Uint8Array(NA*(2*D));
+  const minV=Math.max(400,Math.min(w,h)*1.5);
+  for(let iter=0;iter<14;iter++){
+    let best=0,ba=0,br=0;
+    for(let a=0;a<NA;a++) for(let r=0;r<2*D;r++)
+      if(!used[a*(2*D)+r]&&acc[a*(2*D)+r]>best){best=acc[a*(2*D)+r];ba=a;br=r;}
+    if(best<minV) break;
+    peaks.push({a:ba,r:br-D,votes:best});
+    for(let da=-13;da<=13;da++) for(let dr=-20;dr<=20;dr++){
+      const na=((ba+da)%NA+NA)%NA, nr=br+dr;
+      if(nr>=0&&nr<2*D) used[na*(2*D)+nr]=1;
+    }
+  }
+  if(peaks.length<4) return null;
+
+  function lineIntersect(a1:number,r1:number,a2:number,r2:number):[number,number]|null{
+    const c1=cosT[a1],s1=sinT[a1],c2=cosT[a2],s2=sinT[a2];
+    const det=c1*s2-c2*s1; if(Math.abs(det)<1e-6) return null;
+    return[(r1*s2-r2*s1)/det,(c1*r2-c2*r1)/det];
+  }
+
+  const MARGIN=0.25, cW=canvas.width, cH=canvas.height;
+  const minArea=cW*cH*0.07;
+  // Minimum distance between any two corners (avoid degenerate triangles)
+  const minDist=Math.min(cW,cH)*0.12;
+
+  function evalPairing(la:HL,lb:HL,lc:HL,ld:HL):{corners:Corner[];area:number}|null{
+    // ── Rectangle constraint: opposite sides must be ~parallel, adjacent ~⊥ ──
+    // In this pairing: {la,lb} are one pair of opposite sides, {lc,ld} are the other.
+    // A flat document always satisfies this; arm+jacket combos generally do not.
+    const dAB=Math.min(Math.abs(la.a-lb.a),NA-Math.abs(la.a-lb.a));
+    const dCD=Math.min(Math.abs(lc.a-ld.a),NA-Math.abs(lc.a-ld.a));
+    if(dAB>22||dCD>22) return null; // opposite sides not parallel enough (>22°)
+    const dAC=Math.min(Math.abs(la.a-lc.a),NA-Math.abs(la.a-lc.a));
+    if(Math.abs(dAC-90)>32) return null; // adjacent sides not perpendicular (must be 58°–122°)
+
+    const p0=lineIntersect(la.a,la.r,lc.a,lc.r);
+    const p1=lineIntersect(la.a,la.r,ld.a,ld.r);
+    const p2=lineIntersect(lb.a,lb.r,lc.a,lc.r);
+    const p3=lineIntersect(lb.a,lb.r,ld.a,ld.r);
+    if(!p0||!p1||!p2||!p3) return null;
+
+    const pts:[number,number][]=[p0,p1,p2,p3].map(([x,y])=>[x*invS,y*invS]);
+    for(const [x,y] of pts)
+      if(x<-cW*MARGIN||x>cW*(1+MARGIN)||y<-cH*MARGIN||y>cH*(1+MARGIN)) return null;
+
+    pts.sort((a,b)=>a[1]-b[1]);
+    const top2=pts.slice(0,2).sort((a,b)=>a[0]-b[0]);
+    const bot2=pts.slice(2,4).sort((a,b)=>a[0]-b[0]);
+    const o:Corner[]=[
+      {x:top2[0][0],y:top2[0][1]},{x:top2[1][0],y:top2[1][1]},
+      {x:bot2[1][0],y:bot2[1][1]},{x:bot2[0][0],y:bot2[0][1]},
+    ];
+
+    // ── Guard 1: no two corners too close (prevents degenerate quads) ─────────
+    for(let i=0;i<4;i++) for(let j=i+1;j<4;j++)
+      if(Math.hypot(o[i].x-o[j].x,o[i].y-o[j].y)<minDist) return null;
+
+    // ── Guard 2: all corner angles must be 40°–140° (roughly rectangular) ─────
+    for(let i=0;i<4;i++){
+      const prev=o[(i+3)%4],curr=o[i],next=o[(i+1)%4];
+      const v1=[prev.x-curr.x,prev.y-curr.y], v2=[next.x-curr.x,next.y-curr.y];
+      const dot=v1[0]*v2[0]+v1[1]*v2[1];
+      const mag=Math.sqrt((v1[0]*v1[0]+v1[1]*v1[1])*(v2[0]*v2[0]+v2[1]*v2[1]));
+      if(mag<1) return null;
+      const ang=Math.acos(Math.max(-1,Math.min(1,dot/mag)))*180/Math.PI;
+      if(ang<40||ang>140) return null;
+    }
+
+    // ── Area + convexity ───────────────────────────────────────────────────────
+    let area2=0,sign=0;
+    for(let i=0;i<4;i++){
+      const j=(i+1)%4;
+      area2+=o[i].x*o[j].y-o[j].x*o[i].y;
+      const k=(i+2)%4;
+      const ex1=o[j].x-o[i].x,ey1=o[j].y-o[i].y;
+      const ex2=o[k].x-o[j].x,ey2=o[k].y-o[j].y;
+      const cross=ex1*ey2-ey1*ex2;
+      if(cross!==0){const s=cross>0?1:-1;if(sign===0)sign=s;else if(s!==sign)return null;}
+    }
+    const area=Math.abs(area2)/2;
+    if(area<minArea) return null;
+    return{corners:o,area};
+  }
+
+  // ── Edge-alignment scoring ─────────────────────────────────────────────────
+  //   Sample 25 pts along each of the 4 sides and count edge pixels within 3px.
+  //   The quad whose sides best follow real image edges wins, regardless of area.
+  //   Area is used only as a tiebreaker (×0.001 normalised term).
+  function edgeScore(cs:Corner[]):number{
+    let cnt=0;
+    const SAMP=25, THICK=3;
+    for(let e=0;e<4;e++){
+      const p1=cs[e],p2=cs[(e+1)%4];
+      for(let t=0;t<=SAMP;t++){
+        const fx=(p1.x+(p2.x-p1.x)*t/SAMP)/invS;
+        const fy=(p1.y+(p2.y-p1.y)*t/SAMP)/invS;
+        for(let dy=-THICK;dy<=THICK;dy++) for(let dx=-THICK;dx<=THICK;dx++){
+          const nx=Math.round(fx+dx),ny=Math.round(fy+dy);
+          if(nx>=0&&nx<w&&ny>=0&&ny<h&&edges[ny*w+nx]) cnt++;
+        }
+      }
+    }
+    return cnt;
+  }
+
+  const N=Math.min(peaks.length,12);
+  let bestScore=-1, bestCorners:Corner[]|null=null;
+  for(let i=0;i<N-3;i++) for(let j=i+1;j<N-2;j++) for(let k=j+1;k<N-1;k++) for(let l=k+1;l<N;l++){
+    const pi=peaks[i],pj=peaks[j],pk=peaks[k],pl=peaks[l];
+    for(const [la,lb,lc,ld] of[[pi,pj,pk,pl],[pi,pk,pj,pl],[pi,pl,pj,pk]] as [HL,HL,HL,HL][]){
+      const res=evalPairing(la,lb,lc,ld);
+      if(res){
+        const score=edgeScore(res.corners) + res.area*0.0001;
+        if(score>bestScore){bestScore=score;bestCorners=res.corners;}
+      }
+    }
+  }
+  return bestCorners;
+}
+
 function detectDocumentCorners(canvas: HTMLCanvasElement): Corner[] {
-  const small = scaleCanvas(canvas, 480);
+  return _brightBoundary(canvas) ?? _houghBoundary(canvas) ?? defaultCorners(canvas);
+}
+
+// (kept for potential future use)
+function _unused_detectDocumentCorners_legacy(canvas: HTMLCanvasElement): Corner[] {
+  const small = scaleCanvas(canvas, 640);
   const w = small.width, h = small.height;
   const invS = canvas.width / w;
   const d = small.getContext('2d')!.getImageData(0, 0, w, h).data;
-  const g = new Uint8Array(w * h);
-  for (let i = 0; i < w * h; i++)
-    g[i] = (d[i*4]*77 + d[i*4+1]*150 + d[i*4+2]*29) >> 8;
-  const e = new Uint8Array(w * h);
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const gx = (-g[(y-1)*w+x-1]+g[(y-1)*w+x+1]-2*g[y*w+x-1]+2*g[y*w+x+1]-g[(y+1)*w+x-1]+g[(y+1)*w+x+1]);
-      const gy = (-g[(y-1)*w+x-1]-2*g[(y-1)*w+x]-g[(y-1)*w+x+1]+g[(y+1)*w+x-1]+2*g[(y+1)*w+x]+g[(y+1)*w+x+1]);
-      e[y*w+x] = Math.min(255, Math.sqrt(gx*gx+gy*gy)|0);
+
+  // ── 2. Grayscale + histogram stretch (boosts faint paper/bg contrast) ───────
+  const gray = new Uint8Array(w * h);
+  let gMin = 255, gMax = 0;
+  for (let i = 0; i < w * h; i++) {
+    const v = (d[i*4]*77 + d[i*4+1]*150 + d[i*4+2]*29) >> 8;
+    gray[i] = v; if (v < gMin) gMin = v; if (v > gMax) gMax = v;
+  }
+  const gRange = gMax - gMin || 1;
+  for (let i = 0; i < w * h; i++) gray[i] = ((gray[i] - gMin) * 255 / gRange) | 0;
+
+  // ── 3. Separable box blur (two passes ≈ Gaussian σ≈2.4) ────────────────────
+  function boxBlur(src: Uint8Array, r: number): Uint8Array {
+    const tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        let s = 0, n = 0;
+        for (let dx = -r; dx <= r; dx++) { const nx = x+dx; if (nx>=0&&nx<w) { s+=src[y*w+nx]; n++; } }
+        tmp[y*w+x] = (s/n)|0;
+      }
+    for (let y = 0; y < h; y++)
+      for (let x = 0; x < w; x++) {
+        let s = 0, n = 0;
+        for (let dy = -r; dy <= r; dy++) { const ny = y+dy; if (ny>=0&&ny<h) { s+=tmp[ny*w+x]; n++; } }
+        out[y*w+x] = (s/n)|0;
+      }
+    return out;
+  }
+  const blurred = boxBlur(boxBlur(gray, 2), 2);
+
+  // ── 4. Sobel gradient (magnitude + direction) ────────────────────────────────
+  const mag = new Float32Array(w * h), angArr = new Float32Array(w * h);
+  for (let y = 1; y < h-1; y++)
+    for (let x = 1; x < w-1; x++) {
+      const gx = -blurred[(y-1)*w+x-1]+blurred[(y-1)*w+x+1]
+                 -2*blurred[y*w+x-1]+2*blurred[y*w+x+1]
+                 -blurred[(y+1)*w+x-1]+blurred[(y+1)*w+x+1];
+      const gy = -blurred[(y-1)*w+x-1]-2*blurred[(y-1)*w+x]-blurred[(y-1)*w+x+1]
+                 +blurred[(y+1)*w+x-1]+2*blurred[(y+1)*w+x]+blurred[(y+1)*w+x+1];
+      mag[y*w+x] = Math.sqrt(gx*gx+gy*gy);
+      angArr[y*w+x] = Math.atan2(gy, gx);
+    }
+
+  // ── 5. Non-maximum suppression ───────────────────────────────────────────────
+  const nms = new Float32Array(w * h);
+  for (let y = 1; y < h-1; y++)
+    for (let x = 1; x < w-1; x++) {
+      const m = mag[y*w+x]; if (!m) continue;
+      const a = ((angArr[y*w+x]*180/Math.PI)+180)%180;
+      let n1: number, n2: number;
+      if      (a<22.5||a>=157.5) { n1=mag[y*w+x-1];      n2=mag[y*w+x+1]; }
+      else if (a<67.5)           { n1=mag[(y-1)*w+x+1];  n2=mag[(y+1)*w+x-1]; }
+      else if (a<112.5)          { n1=mag[(y-1)*w+x];    n2=mag[(y+1)*w+x]; }
+      else                       { n1=mag[(y-1)*w+x-1];  n2=mag[(y+1)*w+x+1]; }
+      if (m>=n1&&m>=n2) nms[y*w+x]=m;
+    }
+
+  // ── 6. Hysteresis thresholding (top 3 % strong, top 15 % weak) ──────────────
+  const nmsVals: number[] = [];
+  for (let i = 0; i < w*h; i++) if (nms[i]>0) nmsVals.push(nms[i]);
+  nmsVals.sort((a,b)=>b-a);
+  const hiT = nmsVals[Math.floor(nmsVals.length*0.03)] ?? 50;
+  const loT = hiT * 0.30;
+  const strong = new Uint8Array(w*h), weak = new Uint8Array(w*h);
+  for (let i = 0; i < w*h; i++) {
+    if      (nms[i]>=hiT) strong[i]=1;
+    else if (nms[i]>=loT) weak[i]=1;
+  }
+  const edges = strong.slice();
+  for (let y = 1; y < h-1; y++)
+    for (let x = 1; x < w-1; x++)
+      if (weak[y*w+x] && !edges[y*w+x])
+        for (let dy = -1; dy<=1; dy++)
+          for (let dx = -1; dx<=1; dx++)
+            if (strong[(y+dy)*w+(x+dx)]) { edges[y*w+x]=1; }
+
+  // ── 7. Weighted Hough transform (vote += NMS magnitude so long strong ────────
+  //       document edges outweigh short noisy hand/background edges) ────────────
+  const NA=180, D=Math.ceil(Math.sqrt(w*w+h*h));
+  const acc = new Float32Array(NA*(2*D));
+  const cosT = new Float32Array(NA), sinT = new Float32Array(NA);
+  for (let a=0;a<NA;a++) { const t=a*Math.PI/NA; cosT[a]=Math.cos(t); sinT[a]=Math.sin(t); }
+  for (let y=0;y<h;y++)
+    for (let x=0;x<w;x++) {
+      const ev = nms[y*w+x]; if (!edges[y*w+x] || ev<=0) continue;
+      for (let a=0;a<NA;a++) {
+        const r=Math.round(x*cosT[a]+y*sinT[a])+D;
+        if (r>=0&&r<2*D) acc[a*(2*D)+r]+=ev;
+      }
+    }
+
+  // ── 8. Extract up to 14 peaks (generous – best-quad picks the right ones) ───
+  interface HL { a: number; r: number; votes: number; }
+  const peaks: HL[] = [];
+  const used = new Uint8Array(NA*(2*D));
+  const minV = Math.max(500, Math.min(w,h)*2);
+  for (let iter=0; iter<14; iter++) {
+    let best=0, ba=0, br=0;
+    for (let a=0;a<NA;a++) for (let r=0;r<2*D;r++)
+      if (!used[a*(2*D)+r]&&acc[a*(2*D)+r]>best) { best=acc[a*(2*D)+r]; ba=a; br=r; }
+    if (best<minV) break;
+    peaks.push({a:ba, r:br-D, votes:best});
+    // Suppress a slightly larger neighbourhood to avoid near-duplicate lines
+    for (let da=-14; da<=14; da++)
+      for (let dr=-22; dr<=22; dr++) {
+        const na=((ba+da)%NA+NA)%NA, nr=br+dr;
+        if (nr>=0&&nr<2*D) used[na*(2*D)+nr]=1;
+      }
+  }
+
+  if (peaks.length<4) return defaultCorners(canvas);
+
+  // ── 9. Best-quadrilateral selection ─────────────────────────────────────────
+  //  For every C(N,4) combination of 4 lines, try all 3 possible pairings into
+  //  two pairs (each pair represents one pair of opposite document edges).
+  //  For each pairing, compute the 4 intersection points, sort them into
+  //  TL/TR/BR/BL order, validate convexity + minimum area, and keep the quad
+  //  with the LARGEST area (the document is always the biggest rect in frame).
+  // ─────────────────────────────────────────────────────────────────────────────
+
+  function lineIntersect(a1:number,r1:number,a2:number,r2:number):[number,number]|null {
+    const c1=cosT[a1],s1=sinT[a1],c2=cosT[a2],s2=sinT[a2];
+    const det=c1*s2-c2*s1;
+    if (Math.abs(det)<1e-6) return null;
+    return [(r1*s2-r2*s1)/det, (c1*r2-c2*r1)/det]; // in small-image pixels
+  }
+
+  const MARGIN = 0.28; // allow corners up to 28% outside frame
+  const cW = canvas.width, cH = canvas.height;
+  const minArea = cW * cH * 0.06; // at least 6% of full-res frame
+
+  function evalPairing(
+    la:HL, lb:HL, lc:HL, ld:HL
+  ): { corners: Corner[]; area: number } | null {
+    // la∩lc, la∩ld, lb∩lc, lb∩ld  ← the 4 corners of this pairing
+    const p0=lineIntersect(la.a,la.r,lc.a,lc.r);
+    const p1=lineIntersect(la.a,la.r,ld.a,ld.r);
+    const p2=lineIntersect(lb.a,lb.r,lc.a,lc.r);
+    const p3=lineIntersect(lb.a,lb.r,ld.a,ld.r);
+    if (!p0||!p1||!p2||!p3) return null;
+
+    // Convert to full-res canvas coordinates
+    const pts: [number,number][] = [p0,p1,p2,p3].map(([x,y])=>[x*invS, y*invS]);
+
+    // Reject if any point is too far outside the frame
+    for (const [x,y] of pts) {
+      if (x<-cW*MARGIN||x>cW*(1+MARGIN)||y<-cH*MARGIN||y>cH*(1+MARGIN)) return null;
+    }
+
+    // Parallelism + perpendicularity constraint:
+    //   la & lb must be parallel (opposite sides of doc), lc & ld must be parallel,
+    //   and the two pairs must be ~perpendicular.
+    const angleDiff=(a:number,b:number)=>{const d=Math.abs(a-b)%180;return Math.min(d,180-d);};
+    const dAB=angleDiff(la.a,lb.a), dCD=angleDiff(lc.a,ld.a);
+    if(dAB>28||dCD>28) return null;
+    const avgAB=(la.a+lb.a)/2, avgCD=(lc.a+ld.a)/2;
+    if(Math.abs(angleDiff(avgAB,avgCD)-90)>35) return null;
+
+    // Sort into TL, TR, BR, BL by (y then x), then (x for top-pair, x for bot-pair)
+    pts.sort((a,b)=>a[1]-b[1]);
+    const top2 = pts.slice(0,2).sort((a,b)=>a[0]-b[0]);
+    const bot2 = pts.slice(2,4).sort((a,b)=>a[0]-b[0]);
+    const ordered: Corner[] = [
+      {x:top2[0][0], y:top2[0][1]}, // TL
+      {x:top2[1][0], y:top2[1][1]}, // TR
+      {x:bot2[1][0], y:bot2[1][1]}, // BR
+      {x:bot2[0][0], y:bot2[0][1]}, // BL
+    ];
+
+    // Compute signed area (also checks convexity by sign)
+    let area2 = 0;
+    for (let i=0;i<4;i++) {
+      const j=(i+1)%4;
+      area2 += ordered[i].x*ordered[j].y - ordered[j].x*ordered[i].y;
+    }
+    const area = Math.abs(area2)/2;
+    if (area < minArea) return null;
+
+    // Convexity: all cross-products of consecutive edges must have same sign
+    let sign = 0;
+    for (let i=0;i<4;i++) {
+      const j=(i+1)%4, k=(i+2)%4;
+      const ex1=ordered[j].x-ordered[i].x, ey1=ordered[j].y-ordered[i].y;
+      const ex2=ordered[k].x-ordered[j].x, ey2=ordered[k].y-ordered[j].y;
+      const cross = ex1*ey2-ey1*ex2;
+      if (cross!==0) {
+        const s = cross>0?1:-1;
+        if (sign===0) sign=s;
+        else if (s!==sign) return null; // concave
+      }
+    }
+
+    return { corners: ordered, area };
+  }
+
+  const N = Math.min(peaks.length, 12);
+  let bestArea = -1, bestCorners: Corner[] | null = null;
+
+  for (let i=0;i<N-3;i++)
+  for (let j=i+1;j<N-2;j++)
+  for (let k=j+1;k<N-1;k++)
+  for (let l=k+1;l<N;l++) {
+    const p=peaks, pi=p[i],pj=p[j],pk=p[k],pl=p[l];
+    // 3 pairings of 4 lines into 2 pairs of opposite edges:
+    for (const [la,lb,lc,ld] of [
+      [pi,pj,pk,pl],[pi,pk,pj,pl],[pi,pl,pj,pk]
+    ] as [HL,HL,HL,HL][]) {
+      const res = evalPairing(la,lb,lc,ld);
+      if (res && res.area > bestArea) { bestArea=res.area; bestCorners=res.corners; }
     }
   }
-  let sum = 0, sumSq = 0, cnt = 0;
-  for (let i = 0; i < e.length; i++) { if (e[i]>0) { sum+=e[i]; sumSq+=e[i]*e[i]; cnt++; } }
-  const mean = cnt ? sum/cnt : 80;
-  const std  = cnt ? Math.sqrt(Math.max(0, sumSq/cnt - mean*mean)) : 40;
-  const thresh = Math.max(40, mean + std*0.4);
-  let tlS=Infinity, trS=-Infinity, brS=-Infinity, blS=Infinity;
-  let tl={x:w*0.08,y:h*0.08}, tr={x:w*0.92,y:h*0.08}, br={x:w*0.92,y:h*0.92}, bl={x:w*0.08,y:h*0.92};
-  for (let y=0;y<h;y++) for (let x=0;x<w;x++) {
-    if (e[y*w+x]<thresh) continue;
-    const s=x+y, df=x-y;
-    if (s<tlS){tlS=s;tl={x,y};} if(df>trS){trS=df;tr={x,y};}
-    if (s>brS){brS=s;br={x,y};} if(df<blS){blS=df;bl={x,y};}
-  }
-  const pad=0.015, px=w*pad, py=h*pad;
-  const sc=(c:Corner,dx:number,dy:number):Corner=>({
-    x:Math.max(0,Math.min(canvas.width,(c.x+dx)*invS)),
-    y:Math.max(0,Math.min(canvas.height,(c.y+dy)*invS))
-  });
-  return [sc(tl,-px,-py),sc(tr,px,-py),sc(br,px,py),sc(bl,-px,py)];
+
+  if (bestCorners) return bestCorners;
+  return defaultCorners(canvas);
 }
 
 function cornersValid(cs: Corner[], w: number, h: number): boolean {
@@ -242,6 +810,7 @@ export default function CameraScanner({ onTextDetected, onClose, lookupWord, acc
   const [zoomLevel,    setZoomLevel]    = useState(1.0);
   const [thumbUrl,     setThumbUrl]     = useState('');
   const [warpedDims,   setWarpedDims]   = useState({w:0,h:0});
+  const [pages,        setPages]        = useState<{dataUrl:string}[]>([]);
 
   // ── Camera ───────────────────────────────────────────────────────────────
   const startCamera = useCallback(async (f: 'environment'|'user') => {
@@ -532,6 +1101,43 @@ export default function CameraScanner({ onTextDetected, onClose, lookupWord, acc
     setStatusMsg('Align document within the frame, then capture');
   },[]);
 
+  // Go back to corner-adjust screen without losing the captured image
+  const backToAdjust=useCallback(()=>{
+    setStep('crop'); setProcessed(null); setWords([]); setAllText('');
+    setSelectedWord(null); setViewMode('image'); setZoomLevel(1.0);
+  },[]);
+
+  // Add current processed page to the multi-page queue, then go back to camera
+  const addPage=useCallback(()=>{
+    if(!processed) return;
+    const dataUrl=processed.toDataURL('image/jpeg',0.93);
+    setPages(ps=>[...ps,{dataUrl}]);
+    reset();
+  },[processed,reset]);
+
+  // Remove last page from queue
+  const removePage=useCallback(()=>{
+    setPages(ps=>ps.slice(0,-1));
+  },[]);
+
+  // Export all queued pages as a printable PDF (browser print dialog → Save as PDF)
+  const exportPDF=useCallback(()=>{
+    const all=[...pages,...(processed?[{dataUrl:processed.toDataURL('image/jpeg',0.93)}]:[])];
+    if(all.length===0) return;
+    const w=window.open('','_blank');
+    if(!w) return;
+    const imgs=all.map(p=>`<div class="page"><img src="${p.dataUrl}"></div>`).join('');
+    w.document.write(`<!DOCTYPE html><html><head><meta charset="utf-8"><title>Scanned Document — ${all.length} page${all.length>1?'s':''}</title>
+<style>*{margin:0;padding:0;box-sizing:border-box;}body{background:#fff;}
+.page{display:flex;align-items:center;justify-content:center;min-height:100vh;padding:20px;}
+img{max-width:100%;max-height:100vh;object-fit:contain;}
+@page{margin:5mm;size:auto;}
+@media print{.page{min-height:100vh;page-break-after:always;padding:0;}img{max-height:100%;}}
+</style></head><body>${imgs}
+<script>setTimeout(()=>{window.print();},300);</script></body></html>`);
+    w.document.close();
+  },[pages,processed]);
+
   // ── Derived values ────────────────────────────────────────────────────────
   const screenCorners=corners.map(c=>imgToSc(c));
   const dictWords=words.filter(w=>w.meaning!==null);
@@ -662,7 +1268,20 @@ export default function CameraScanner({ onTextDetected, onClose, lookupWord, acc
                 </div>
               )}
             </div>
-            {/* Mode indicator */}
+            {/* PDF queue indicator (live step) */}
+            {pages.length>0&&(
+              <div style={{position:'absolute',top:14,right:14,zIndex:20,display:'flex',gap:6,alignItems:'center'}}>
+                <button onClick={exportPDF}
+                  style={{backgroundColor:`${accentColor}22`,border:`1px solid ${accentColor}66`,borderRadius:8,color:accentColor,fontSize:12,fontWeight:700,padding:'6px 12px',cursor:'pointer',backdropFilter:'blur(8px)'}}>
+                  Export PDF · {pages.length} page{pages.length>1?'s':''}
+                </button>
+                <button onClick={()=>setPages([])}
+                  style={{backgroundColor:'rgba(255,60,60,0.12)',border:'1px solid rgba(255,60,60,0.3)',borderRadius:8,color:'#f77',fontSize:11,fontWeight:700,padding:'6px 8px',cursor:'pointer'}}>
+                  Clear
+                </button>
+              </div>
+            )}
+          {/* Mode indicator */}
             <div style={{position:'absolute',bottom:120,left:0,right:0,display:'flex',justifyContent:'center'}}>
               <div style={{backgroundColor:'rgba(0,0,0,0.55)',backdropFilter:'blur(6px)',borderRadius:6,padding:'4px 12px',border:'1px solid rgba(255,255,255,0.1)'}}>
                 <span style={{color:'#777',fontSize:11}}>Mode: </span>
@@ -943,6 +1562,17 @@ export default function CameraScanner({ onTextDetected, onClose, lookupWord, acc
         {/* RESULTS */}
         {step==='results'&&(
           <div style={{display:'flex',flexDirection:'column',gap:9}}>
+            {/* Page queue strip */}
+            {pages.length>0&&(
+              <div style={{display:'flex',alignItems:'center',gap:8,padding:'6px 2px',overflowX:'auto'}}>
+                <span style={{color:'#555',fontSize:10,fontWeight:700,flexShrink:0}}>{pages.length} page{pages.length>1?'s':''} queued</span>
+                {pages.map((p,i)=>(
+                  <img key={i} src={p.dataUrl} alt={`Page ${i+1}`}
+                    style={{height:40,borderRadius:4,border:'1px solid rgba(255,255,255,0.15)',flexShrink:0,objectFit:'contain',backgroundColor:'#111'}}/>
+                ))}
+                <button onClick={removePage} style={{...btnS,fontSize:10,color:'#f66',border:'1px solid rgba(255,80,80,0.2)',borderRadius:5,flexShrink:0}}>−</button>
+              </div>
+            )}
             {selectedWord?(
               <>
                 <div style={{backgroundColor:'rgba(91,132,196,0.12)',border:`1px solid ${accentColor}44`,borderRadius:10,padding:'10px 14px',display:'flex',flexDirection:'column',gap:5}}>
@@ -961,16 +1591,27 @@ export default function CameraScanner({ onTextDetected, onClose, lookupWord, acc
                 </div>
               </>
             ):(
-              <div style={{display:'flex',gap:7}}>
-                <button onClick={reset} style={{...actionBtnS,flex:1,backgroundColor:'rgba(255,255,255,0.06)',color:'#999',border:'1px solid rgba(255,255,255,0.08)'}}>Scan Again</button>
-                {allText&&(
-                  <button onClick={copyText} style={{...actionBtnS,flex:1,backgroundColor:copied?'rgba(40,120,40,0.3)':'rgba(255,255,255,0.07)',
-                    color:copied?'#6f6':'#aaa',border:`1px solid ${copied?'rgba(100,200,100,0.3)':'rgba(255,255,255,0.1)'}`,transition:'all 0.3s'}}>
-                    {copied?'Copied':'Copy Text'}
+              <>
+                <div style={{display:'flex',gap:7}}>
+                  <button onClick={backToAdjust} style={{...actionBtnS,flex:1,backgroundColor:'rgba(255,255,255,0.07)',color:'#bbb',border:'1px solid rgba(255,255,255,0.12)'}}>◀ Adjust</button>
+                  <button onClick={reset} style={{...actionBtnS,flex:1,backgroundColor:'rgba(255,255,255,0.06)',color:'#888',border:'1px solid rgba(255,255,255,0.08)'}}>↺ Rescan</button>
+                  {allText&&(
+                    <button onClick={copyText} style={{...actionBtnS,flex:1,backgroundColor:copied?'rgba(40,120,40,0.3)':'rgba(255,255,255,0.07)',
+                      color:copied?'#6f6':'#aaa',border:`1px solid ${copied?'rgba(100,200,100,0.3)':'rgba(255,255,255,0.1)'}`,transition:'all 0.3s'}}>
+                      {copied?'✓ Copied':'Copy'}
+                    </button>
+                  )}
+                  <button onClick={()=>downloadScan('jpeg')} style={{...actionBtnS,flex:1,backgroundColor:'rgba(255,255,255,0.07)',color:'#aaa',border:'1px solid rgba(255,255,255,0.1)'}}>JPEG</button>
+                </div>
+                <div style={{display:'flex',gap:7}}>
+                  <button onClick={addPage} style={{...actionBtnS,flex:2,backgroundColor:`${accentColor}22`,color:accentColor,border:`1px solid ${accentColor}55`,fontSize:13}}>
+                    + Add Page {pages.length>0?`(${pages.length+1} total)`:''}
                   </button>
-                )}
-                <button onClick={()=>downloadScan('jpeg')} style={{...actionBtnS,flex:1,backgroundColor:`${accentColor}22`,color:accentColor,border:`1px solid ${accentColor}44`}}>Save JPEG</button>
-              </div>
+                  <button onClick={exportPDF} style={{...actionBtnS,flex:3,backgroundColor:accentColor,color:'#fff',fontSize:13}}>
+                    {pages.length>0?`Export PDF (${pages.length+1} pages)`:'Export / Print PDF'}
+                  </button>
+                </div>
+              </>
             )}
           </div>
         )}
