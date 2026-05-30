@@ -146,9 +146,14 @@ export default function CameraScanner({
 
   // ── Start/stop camera ────────────────────────────────────────────────────
   const startCamera = useCallback(async (facing: 'environment' | 'user') => {
+    // Stop any existing stream first
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => t.stop());
       streamRef.current = null;
+    }
+    // Reset the video element to avoid AbortError from interrupted play()
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -158,10 +163,16 @@ export default function CameraScanner({
       streamRef.current = stream;
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
-        videoRef.current.play();
+        try {
+          await videoRef.current.play();
+        } catch (playErr: any) {
+          // AbortError is expected if component unmounts mid-play; ignore it
+          if (playErr.name !== 'AbortError') throw playErr;
+        }
       }
       setCameraError(null);
     } catch (err: any) {
+      if (err.name === 'AbortError') return; // ignore — component unmounted
       const msg =
         err.name === 'NotAllowedError' ? 'Camera access denied. Please allow camera permission and try again.' :
         err.name === 'NotFoundError'   ? 'No camera found on this device.' :
@@ -170,7 +181,7 @@ export default function CameraScanner({
     }
   }, []);
 
-  // ── Init worker + camera ─────────────────────────────────────────────────
+  // ── Init worker + camera — runs once on mount ─────────────────────────────
   useEffect(() => {
     let mounted = true;
 
@@ -180,7 +191,8 @@ export default function CameraScanner({
         const worker = await createWorker('eng', 1, { logger: () => {} });
         if (!mounted) { await worker.terminate(); return; }
         workerRef.current = worker;
-        await startCamera(facingMode);
+        await startCamera('environment');
+        if (!mounted) return;
         setStatusMsg('Point camera at text');
         loopRef.current = true;
         runOCRLoop();
@@ -196,12 +208,7 @@ export default function CameraScanner({
       workerRef.current?.terminate();
       workerRef.current = null;
     };
-  }, []);  // only on mount
-
-  // ── Re-init camera when facing mode changes ───────────────────────────────
-  useEffect(() => {
-    startCamera(facingMode);
-  }, [facingMode, startCamera]);
+  }, []);  // only on mount — no dependency on facingMode
 
   // ── Handle click on overlay canvas → find word under pointer ─────────────
   const handleOverlayClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
