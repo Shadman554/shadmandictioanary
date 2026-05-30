@@ -33,6 +33,7 @@ module.exports = {
         include: [
           path.resolve(appDirectory, 'App.tsx'),
           path.resolve(appDirectory, 'CameraScanner.tsx'),
+          path.resolve(appDirectory, 'Icons.tsx'),
           path.resolve(appDirectory, 'index.web.js'),
           path.resolve(appDirectory, 'node_modules/react-native-web'),
           path.resolve(appDirectory, 'node_modules/@react-native-async-storage'),
